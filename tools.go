@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -1036,7 +1035,7 @@ func toolShell(args map[string]interface{}, workDir string) (string, bool) {
 		"CI=1",
 	)
 	// Use process group so we can kill children on timeout
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	setProcGroup(cmd)
 
 	// Combine stdout + stderr, timeout at 2 minutes
 	started := time.Now()
@@ -1061,10 +1060,8 @@ func toolShell(args map[string]interface{}, workDir string) (string, bool) {
 		}
 		return truncateOutput(fmt.Sprintf("%s\n\nExit code: 0 | Wall time: %.1fs", result, elapsed)), true
 	case <-time.After(2 * time.Minute):
-		if cmd.Process != nil {
-			// Kill entire process group to prevent zombies
-			syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		}
+		// Kill entire process group to prevent zombies
+		killProcGroup(cmd)
 		return "Error: command timed out after 2 minutes", false
 	}
 }
