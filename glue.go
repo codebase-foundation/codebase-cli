@@ -80,6 +80,20 @@ When in doubt, pick "agent". Respond with ONLY one word: agent, plan, chat, or c
 
 // ClassifyIntent determines what kind of response a user message needs.
 func (g *GlueClient) ClassifyIntent(userMsg string, hasHistory bool) Intent {
+	// If there's an active conversation, follow-ups almost always go to agent.
+	// Only classify from scratch on the first message or after a greeting.
+	if hasHistory {
+		// Quick check: is this clearly just "thanks" / "hi" / "ok"?
+		lower := strings.ToLower(strings.TrimSpace(userMsg))
+		greetings := []string{"hi", "hey", "hello", "thanks", "thank you", "ok", "cool", "nice", "bye"}
+		for _, g := range greetings {
+			if lower == g {
+				return IntentChat
+			}
+		}
+		return IntentAgent
+	}
+
 	messages := []ChatMessage{
 		{Role: "system", Content: strPtr(classifyPrompt)},
 		{Role: "user", Content: strPtr(userMsg)},
@@ -91,17 +105,12 @@ func (g *GlueClient) ClassifyIntent(userMsg string, hasHistory bool) Intent {
 	}
 
 	result = strings.TrimSpace(strings.ToLower(result))
-	// Extract just the keyword — check plan before agent since "agent" is a substring match risk
 	for _, intent := range []Intent{IntentPlan, IntentChat, IntentClarify, IntentAgent} {
 		if strings.Contains(result, string(intent)) {
-			// If they have conversation history, "clarify" becomes less useful
-			if intent == IntentClarify && hasHistory {
-				return IntentAgent
-			}
 			return intent
 		}
 	}
-	return IntentAgent // default: let the agent handle it
+	return IntentAgent
 }
 
 // ──────────────────────────────────────────────────────────────

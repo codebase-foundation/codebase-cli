@@ -124,6 +124,28 @@ func newChatModel(cfg *Config) chatModel {
 	}
 }
 
+// recentContext extracts the last few user/assistant exchanges from the agent
+// history so that glue models (classify, chat) know what was said.
+func (m *chatModel) recentContext() []ChatMessage {
+	if m.agent == nil {
+		return nil
+	}
+	// Pull user + assistant messages from agent history (skip system, tool)
+	var msgs []ChatMessage
+	for _, msg := range m.agent.history {
+		if msg.Role == "user" || msg.Role == "assistant" {
+			if msg.Content != nil && *msg.Content != "" {
+				msgs = append(msgs, ChatMessage{Role: msg.Role, Content: msg.Content})
+			}
+		}
+	}
+	// Keep last 6 messages max (3 exchanges) to stay cheap
+	if len(msgs) > 6 {
+		msgs = msgs[len(msgs)-6:]
+	}
+	return msgs
+}
+
 func (m chatModel) Init() tea.Cmd {
 	return tea.Batch(
 		textinput.Blink,
@@ -204,6 +226,7 @@ func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 
 				// Route through glue intent classification
 				hasHistory := m.agent != nil
+				ctx := m.recentContext()
 				intent := m.glue.ClassifyIntent(prompt, hasHistory)
 
 				switch intent {
@@ -214,7 +237,7 @@ func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 					})
 					glue := m.glue
 					cmds = append(cmds, func() tea.Msg {
-						reply := glue.ChatReply(prompt, nil)
+						reply := glue.ChatReply(prompt, ctx)
 						return glueResultMsg{kind: "chat", text: reply}
 					})
 
