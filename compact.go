@@ -136,6 +136,31 @@ func compactHistory(client *LLMClient, messages []ChatMessage) ([]ChatMessage, b
 
 	// Split: older to summarize, recent to keep
 	splitAt := len(nonSystem) - keepRecentMessages
+
+	// Don't split between a tool-call assistant message and its tool results.
+	// Walk backward to find a safe split point.
+	for splitAt > 0 && splitAt < len(nonSystem) {
+		msg := nonSystem[splitAt]
+		if msg.Role == "tool" {
+			// This is a tool result — can't split here, move earlier
+			splitAt--
+			continue
+		}
+		// If the previous message is an assistant with tool_calls,
+		// we'd orphan the tool results. Move back before it.
+		if splitAt > 0 {
+			prev := nonSystem[splitAt-1]
+			if prev.Role == "assistant" && len(prev.ToolCalls) > 0 {
+				splitAt--
+				continue
+			}
+		}
+		break
+	}
+	if splitAt <= 0 {
+		return messages, false
+	}
+
 	toSummarize := nonSystem[:splitAt]
 	toKeep := nonSystem[splitAt:]
 

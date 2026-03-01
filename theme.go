@@ -2,200 +2,241 @@ package main
 
 import (
 	"math"
+	"os"
+	"strings"
 
 	colorful "github.com/lucasb-eyer/go-colorful"
 	"github.com/charmbracelet/lipgloss"
 )
 
 // ──────────────────────────────────────────────────────────────
-//  PHOSPHOR — color palette
+//  Theme — switchable color palettes (dark / light)
+// ──────────────────────────────────────────────────────────────
+
+// Theme holds all semantic colors for the TUI.
+type Theme struct {
+	Name      string
+	Bg        string
+	Surface   string
+	Border    string
+	BorderHi  string
+	Text      string
+	Secondary string
+	Dim       string
+	Accent    string
+	Success   string
+	Warning   string
+	Error     string
+	Purple    string
+	Orange    string
+	Cyan      string
+}
+
+func themeDark() Theme {
+	return Theme{
+		Name:      "dark",
+		Bg:        "#0d1117",
+		Surface:   "#161b22",
+		Border:    "#30363d",
+		BorderHi:  "#58a6ff",
+		Text:      "#e6edf3",
+		Secondary: "#7d8590",
+		Dim:       "#484f58",
+		Accent:    "#58a6ff",
+		Success:   "#3fb950",
+		Warning:   "#d29922",
+		Error:     "#f85149",
+		Purple:    "#a371f7",
+		Orange:    "#f0883e",
+		Cyan:      "#56d4dd",
+	}
+}
+
+func themeLight() Theme {
+	return Theme{
+		Name:      "light",
+		Bg:        "#ffffff",
+		Surface:   "#f6f8fa",
+		Border:    "#d0d7de",
+		BorderHi:  "#0969da",
+		Text:      "#1f2328",
+		Secondary: "#656d76",
+		Dim:       "#8b949e",
+		Accent:    "#0969da",
+		Success:   "#1a7f37",
+		Warning:   "#9a6700",
+		Error:     "#d1242f",
+		Purple:    "#8250df",
+		Orange:    "#bc4c00",
+		Cyan:      "#0598bc",
+	}
+}
+
+// activeTheme is the current color palette.
+var activeTheme = themeDark()
+
+// ──────────────────────────────────────────────────────────────
+//  Color vars — populated from activeTheme by initStyles()
 // ──────────────────────────────────────────────────────────────
 
 var (
-	colBg        = lipgloss.Color("#0d1117")
-	colSurface   = lipgloss.Color("#161b22")
-	colBorder    = lipgloss.Color("#30363d")
-	colBorderHi  = lipgloss.Color("#58a6ff")
-	colText      = lipgloss.Color("#e6edf3")
-	colSecondary = lipgloss.Color("#7d8590")
-	colDim       = lipgloss.Color("#484f58")
-	colAccent    = lipgloss.Color("#58a6ff")
-	colSuccess   = lipgloss.Color("#3fb950")
-	colWarning   = lipgloss.Color("#d29922")
-	colError     = lipgloss.Color("#f85149")
-	colPurple    = lipgloss.Color("#a371f7")
-	colOrange    = lipgloss.Color("#f0883e")
-	colCyan      = lipgloss.Color("#56d4dd")
+	colBg        lipgloss.Color
+	colSurface   lipgloss.Color
+	colBorder    lipgloss.Color
+	colBorderHi  lipgloss.Color
+	colText      lipgloss.Color
+	colSecondary lipgloss.Color
+	colDim       lipgloss.Color
+	colAccent    lipgloss.Color
+	colSuccess   lipgloss.Color
+	colWarning   lipgloss.Color
+	colError     lipgloss.Color
+	colPurple    lipgloss.Color
+	colOrange    lipgloss.Color
+	colCyan      lipgloss.Color
 )
 
 // ──────────────────────────────────────────────────────────────
-//  Reusable styles
+//  Style vars — rebuilt from colors by initStyles()
 // ──────────────────────────────────────────────────────────────
 
-// Main outer frame (idle)
-var styleFrame = lipgloss.NewStyle().
-	Border(lipgloss.RoundedBorder()).
-	BorderForeground(colBorder).
-	Padding(0, 1)
-
-// Main outer frame (streaming / active)
-var styleFrameActive = lipgloss.NewStyle().
-	Border(lipgloss.RoundedBorder()).
-	BorderForeground(colBorderHi).
-	Padding(0, 1)
-
-// Main outer frame (done flash)
-var styleFrameDone = lipgloss.NewStyle().
-	Border(lipgloss.RoundedBorder()).
-	BorderForeground(colSuccess).
-	Padding(0, 1)
-
-// Main outer frame (planning mode)
-var styleFramePlan = lipgloss.NewStyle().
-	Border(lipgloss.RoundedBorder()).
-	BorderForeground(colPurple).
-	Padding(0, 1)
-
-// Tool block — pending (spinner visible)
-var styleToolPending = lipgloss.NewStyle().
-	Border(lipgloss.RoundedBorder()).
-	BorderForeground(colOrange)
-
-// Tool block — success
-var styleToolSuccess = lipgloss.NewStyle().
-	Border(lipgloss.RoundedBorder()).
-	BorderForeground(colSuccess)
-
-// Tool block — error
-var styleToolError = lipgloss.NewStyle().
-	Border(lipgloss.RoundedBorder()).
-	BorderForeground(colError)
-
-// User prompt prefix
-var styleUserLabel = lipgloss.NewStyle().
-	Foreground(colAccent).
-	Bold(true)
-
-// Agent text
-var styleAgentText = lipgloss.NewStyle().
-	Foreground(colText)
-
-// Muted / secondary text
-var styleMuted = lipgloss.NewStyle().
-	Foreground(colSecondary)
-
-// Dim text
-var styleDim = lipgloss.NewStyle().
-	Foreground(colDim)
-
-// File path
-var styleFilePath = lipgloss.NewStyle().
-	Foreground(colCyan)
-
-// Line numbers in file preview
-var styleLineNo = lipgloss.NewStyle().
-	Foreground(colDim)
-
-// Success indicator
-var styleOK = lipgloss.NewStyle().
-	Foreground(colSuccess).
-	Bold(true)
-
-// Error indicator
-var styleErr = lipgloss.NewStyle().
-	Foreground(colError).
-	Bold(true)
-
-// Warning
-var styleWarn = lipgloss.NewStyle().
-	Foreground(colWarning)
-
-// Purple (thinking)
-var styleThinking = lipgloss.NewStyle().
-	Foreground(colPurple).
-	Italic(true)
-
-// Orange (tool name)
-var styleToolName = lipgloss.NewStyle().
-	Foreground(colOrange).
-	Bold(true)
-
-// Status bar
-var styleStatusBar = lipgloss.NewStyle().
-	Foreground(colSecondary)
-
-// Boot title
-var styleBootTitle = lipgloss.NewStyle().
-	Foreground(colAccent).
-	Bold(true)
-
-// Boot label (left side of dot lines)
-var styleBootLabel = lipgloss.NewStyle().
-	Foreground(colSecondary)
-
-// Boot value (right side of dot lines)
-var styleBootValue = lipgloss.NewStyle().
-	Foreground(colText)
-
-// Boot dots
-var styleBootDots = lipgloss.NewStyle().
-	Foreground(colDim)
-
-// Boot check mark
-var styleBootCheck = lipgloss.NewStyle().
-	Foreground(colSuccess)
-
-// Prompt character
-var stylePromptChar = lipgloss.NewStyle().
-	Foreground(colAccent).
-	Bold(true)
-
-// ──────────────────────────────────────────────────────────────
-//  Demoscene — starfield, copper bars, color cycling
-// ──────────────────────────────────────────────────────────────
-
-// Star layer foreground colors (far → near)
 var (
-	colStarFar  = lipgloss.Color("#333344")
-	colStarMid  = lipgloss.Color("#667788")
-	colStarNear = lipgloss.Color("#bbccdd")
+	styleFrame       lipgloss.Style
+	styleFrameActive lipgloss.Style
+	styleFrameDone   lipgloss.Style
+	styleFramePlan   lipgloss.Style
+	styleToolPending lipgloss.Style
+	styleToolSuccess lipgloss.Style
+	styleToolError   lipgloss.Style
+	styleUserLabel   lipgloss.Style
+	styleAgentText   lipgloss.Style
+	styleMuted       lipgloss.Style
+	styleDim         lipgloss.Style
+	styleFilePath    lipgloss.Style
+	styleLineNo      lipgloss.Style
+	styleOK          lipgloss.Style
+	styleErr         lipgloss.Style
+	styleWarn        lipgloss.Style
+	styleThinking    lipgloss.Style
+	styleToolName    lipgloss.Style
+	styleStatusBar   lipgloss.Style
+	styleBootTitle   lipgloss.Style
+	styleBootLabel   lipgloss.Style
+	styleBootValue   lipgloss.Style
+	styleBootDots    lipgloss.Style
+	styleBootCheck   lipgloss.Style
+	stylePromptChar  lipgloss.Style
+	styleAccentText  lipgloss.Style
 )
 
-// buildRetroPalette returns 16 C64/Amiga-inspired hex colors for cycling.
-func buildRetroPalette() []string {
-	hexColors := []string{
-		"#ff0055", // hot pink
-		"#ff3300", // red-orange
-		"#ff6600", // orange
-		"#ffaa00", // amber
-		"#ffdd00", // yellow
-		"#aaff00", // yellow-green
-		"#00ff55", // green
-		"#00ffaa", // teal
-		"#00ddff", // cyan
-		"#0088ff", // sky blue
-		"#0044ff", // blue
-		"#4400ff", // indigo
-		"#8800ff", // purple
-		"#cc00ff", // magenta
-		"#ff00cc", // deep pink
-		"#ff0088", // rose
+// initTheme reads CODEBASE_THEME env var and initializes all colors+styles.
+func initTheme() {
+	name := strings.ToLower(os.Getenv("CODEBASE_THEME"))
+	switch name {
+	case "light":
+		activeTheme = themeLight()
+	default:
+		activeTheme = themeDark()
 	}
-	return hexColors
+	initStyles()
 }
 
-// buildCopperGradient creates a symmetric gradient of hex colors for a copper bar.
-// The gradient goes from hex1 at the edges to hex2 at the center.
-func buildCopperGradient(hex1, hex2 string, steps int) []string {
-	c1, _ := colorful.Hex(hex1)
-	c2, _ := colorful.Hex(hex2)
-	grad := make([]string, steps)
-	for i := 0; i < steps; i++ {
-		t := float64(i) / float64(steps-1)
-		grad[i] = c1.BlendHcl(c2, t).Clamped().Hex()
+// setTheme switches the active theme and rebuilds all styles.
+func setTheme(name string) {
+	switch strings.ToLower(name) {
+	case "light":
+		activeTheme = themeLight()
+	default:
+		activeTheme = themeDark()
 	}
-	return grad
+	initStyles()
 }
+
+// initStyles populates all col* and style* vars from activeTheme.
+func initStyles() {
+	t := activeTheme
+
+	// Colors
+	colBg = lipgloss.Color(t.Bg)
+	colSurface = lipgloss.Color(t.Surface)
+	colBorder = lipgloss.Color(t.Border)
+	colBorderHi = lipgloss.Color(t.BorderHi)
+	colText = lipgloss.Color(t.Text)
+	colSecondary = lipgloss.Color(t.Secondary)
+	colDim = lipgloss.Color(t.Dim)
+	colAccent = lipgloss.Color(t.Accent)
+	colSuccess = lipgloss.Color(t.Success)
+	colWarning = lipgloss.Color(t.Warning)
+	colError = lipgloss.Color(t.Error)
+	colPurple = lipgloss.Color(t.Purple)
+	colOrange = lipgloss.Color(t.Orange)
+	colCyan = lipgloss.Color(t.Cyan)
+
+	// Frame styles
+	styleFrame = lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(colBorder).
+		Padding(0, 1)
+	styleFrameActive = lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(colBorderHi).
+		Padding(0, 1)
+	styleFrameDone = lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(colSuccess).
+		Padding(0, 1)
+	styleFramePlan = lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(colPurple).
+		Padding(0, 1)
+
+	// Tool block styles
+	styleToolPending = lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(colOrange)
+	styleToolSuccess = lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(colSuccess)
+	styleToolError = lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(colError)
+
+	// Text styles
+	styleUserLabel = lipgloss.NewStyle().Foreground(colAccent).Bold(true)
+	styleAgentText = lipgloss.NewStyle().Foreground(colText)
+	styleMuted = lipgloss.NewStyle().Foreground(colSecondary)
+	styleDim = lipgloss.NewStyle().Foreground(colDim)
+	styleFilePath = lipgloss.NewStyle().Foreground(colCyan)
+	styleLineNo = lipgloss.NewStyle().Foreground(colDim)
+
+	// Indicators
+	styleOK = lipgloss.NewStyle().Foreground(colSuccess).Bold(true)
+	styleErr = lipgloss.NewStyle().Foreground(colError).Bold(true)
+	styleWarn = lipgloss.NewStyle().Foreground(colWarning)
+	styleThinking = lipgloss.NewStyle().Foreground(colPurple).Italic(true)
+
+	// Misc
+	styleToolName = lipgloss.NewStyle().Foreground(colOrange).Bold(true)
+	styleStatusBar = lipgloss.NewStyle().Foreground(colSecondary)
+	stylePromptChar = lipgloss.NewStyle().Foreground(colAccent).Bold(true)
+	styleAccentText = lipgloss.NewStyle().Foreground(colAccent).Bold(true)
+
+	// Boot
+	styleBootTitle = lipgloss.NewStyle().Foreground(colAccent).Bold(true)
+	styleBootLabel = lipgloss.NewStyle().Foreground(colSecondary)
+	styleBootValue = lipgloss.NewStyle().Foreground(colText)
+	styleBootDots = lipgloss.NewStyle().Foreground(colDim)
+	styleBootCheck = lipgloss.NewStyle().Foreground(colSuccess)
+}
+
+func init() {
+	// Initialize with defaults so styles are usable even without calling initTheme()
+	initTheme()
+}
+
+// ──────────────────────────────────────────────────────────────
+//  Color helpers
+// ──────────────────────────────────────────────────────────────
 
 // lerpColor blends two hex colors by t (0.0 = hex1, 1.0 = hex2).
 func lerpColor(hex1, hex2 string, t float64) string {
@@ -208,17 +249,5 @@ func lerpColor(hex1, hex2 string, t float64) string {
 // fgStyle returns a lipgloss style with the given hex foreground color.
 func fgStyle(hex string) lipgloss.Style {
 	return lipgloss.NewStyle().Foreground(lipgloss.Color(hex))
-}
-
-// fgBgStyle returns a lipgloss style with foreground and background hex colors.
-func fgBgStyle(fg, bg string) lipgloss.Style {
-	return lipgloss.NewStyle().
-		Foreground(lipgloss.Color(fg)).
-		Background(lipgloss.Color(bg))
-}
-
-// bgStyle returns a lipgloss style with only the given hex background color.
-func bgStyle(hex string) lipgloss.Style {
-	return lipgloss.NewStyle().Background(lipgloss.Color(hex))
 }
 

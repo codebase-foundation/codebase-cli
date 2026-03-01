@@ -37,8 +37,8 @@ func NewGlueClient(mainCfg *Config) *GlueClient {
 	smartModel := envOr("GLUE_SMART_MODEL", mainCfg.Model)
 
 	return &GlueClient{
-		fast:  NewLLMClient(apiKey, baseURL, fastModel),
-		smart: NewLLMClient(apiKey, baseURL, smartModel),
+		fast:  newLLMClientWithTimeout(apiKey, baseURL, fastModel, 15*time.Second),
+		smart: newLLMClientWithTimeout(apiKey, baseURL, smartModel, 15*time.Second),
 	}
 }
 
@@ -86,8 +86,8 @@ func (g *GlueClient) ClassifyIntent(userMsg string, hasHistory bool) Intent {
 		// Quick check: is this clearly just "thanks" / "hi" / "ok"?
 		lower := strings.ToLower(strings.TrimSpace(userMsg))
 		greetings := []string{"hi", "hey", "hello", "thanks", "thank you", "ok", "cool", "nice", "bye"}
-		for _, g := range greetings {
-			if lower == g {
+		for _, gr := range greetings {
+			if lower == gr {
 				return IntentChat
 			}
 		}
@@ -276,7 +276,7 @@ func (g *GlueClient) SuggestFollowUps(taskSummary string, filesChanged int) []st
 		{Role: "user", Content: strPtr(fmt.Sprintf("Task: %s\nFiles changed: %d", taskSummary, filesChanged))},
 	}
 
-	result, err := nonStreamingChat(g.smart, messages)
+	result, err := nonStreamingChat(g.fast, messages)
 	if err != nil {
 		return nil
 	}

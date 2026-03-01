@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -289,13 +290,21 @@ func safePath(workDir, relPath string) (string, error) {
 	if !strings.HasPrefix(abs, absRoot+string(filepath.Separator)) && abs != absRoot {
 		return "", fmt.Errorf("path %q resolves outside project root", relPath)
 	}
+	// Resolve symlinks and re-check containment
+	if real, err := filepath.EvalSymlinks(abs); err == nil {
+		realRoot, _ := filepath.EvalSymlinks(absRoot)
+		if !strings.HasPrefix(real, realRoot+string(filepath.Separator)) && real != realRoot {
+			return "", fmt.Errorf("path %q symlinks outside project root", relPath)
+		}
+		abs = real
+	}
 	return abs, nil
 }
 
 func truncateOutput(s string) string {
 	if len(s) > maxOutputChars {
 		cutChars := len(s) - maxOutputChars
-		return s[:maxOutputChars] + fmt.Sprintf("\n\n--- OUTPUT TRUNCATED (%d chars cut, %d total) ---\nUse read_file with offset/limit or refine your command to see specific sections.", cutChars, len(s))
+		return s[:maxOutputChars] + fmt.Sprintf("\n\n--- OUTPUT TRUNCATED (%d chars cut, %d total) ---\nRefine your command or use offset/limit to see specific sections.", cutChars, len(s))
 	}
 	return s
 }
@@ -393,6 +402,17 @@ func toolReadFile(args map[string]interface{}, workDir string) (string, bool) {
 		return fmt.Sprintf("Error: %v", err), false
 	}
 
+	// Detect binary files by checking for null bytes in the first 512 bytes
+	checkLen := len(data)
+	if checkLen > 512 {
+		checkLen = 512
+	}
+	for i := 0; i < checkLen; i++ {
+		if data[i] == 0 {
+			return fmt.Sprintf("Error: %q appears to be a binary file. Use shell with 'file', 'hexdump', or 'xxd' to inspect it.", relPath), false
+		}
+	}
+
 	lines := strings.Split(string(data), "\n")
 	totalLines := len(lines)
 
@@ -439,9 +459,13 @@ func toolWriteFile(args map[string]interface{}, workDir string) (string, bool) {
 		return fmt.Sprintf("Error: %v", err), false
 	}
 
-	// Check if file already exists
-	_, existErr := os.Stat(absPath)
+	// Check if file already exists and preserve permissions
+	info, existErr := os.Stat(absPath)
 	existed := existErr == nil
+	perm := os.FileMode(0644)
+	if existed {
+		perm = info.Mode().Perm()
+	}
 
 	// Ensure parent directory exists
 	dir := filepath.Dir(absPath)
@@ -449,7 +473,7 @@ func toolWriteFile(args map[string]interface{}, workDir string) (string, bool) {
 		return fmt.Sprintf("Error creating directory: %v", err), false
 	}
 
-	if err := os.WriteFile(absPath, []byte(content), 0644); err != nil {
+	if err := os.WriteFile(absPath, []byte(content), perm); err != nil {
 		return fmt.Sprintf("Error: %v", err), false
 	}
 
@@ -475,11 +499,17 @@ func toolEditFile(args map[string]interface{}, workDir string) (string, bool) {
 		return fmt.Sprintf("Error: %v", err), false
 	}
 
-	data, err := os.ReadFile(absPath)
+	info, err := os.Stat(absPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return fmt.Sprintf("Error: File not found: %s", relPath), false
 		}
+		return fmt.Sprintf("Error: %v", err), false
+	}
+	perm := info.Mode().Perm()
+
+	data, err := os.ReadFile(absPath)
+	if err != nil {
 		return fmt.Sprintf("Error: %v", err), false
 	}
 
@@ -507,7 +537,7 @@ func toolEditFile(args map[string]interface{}, workDir string) (string, bool) {
 	}
 
 	newContent := strings.Replace(content, oldText, newText, 1)
-	if err := os.WriteFile(absPath, []byte(newContent), 0644); err != nil {
+	if err := os.WriteFile(absPath, []byte(newContent), perm); err != nil {
 		return fmt.Sprintf("Error writing: %v", err), false
 	}
 
@@ -599,7 +629,7 @@ func toolMultiEdit(args map[string]interface{}, workDir string) (string, bool) {
 			continue
 		}
 
-		data, err := os.ReadFile(absPath)
+		fileInfo, err := os.Stat(absPath)
 		if err != nil {
 			detail := fmt.Sprintf("Read error: %v", err)
 			if os.IsNotExist(err) {
@@ -607,6 +637,16 @@ func toolMultiEdit(args map[string]interface{}, workDir string) (string, bool) {
 			}
 			for _, e := range fileEdits {
 				results[e.index] = editResult{path: filePath, status: "error", detail: detail}
+				totalFailed++
+			}
+			continue
+		}
+		filePerm := fileInfo.Mode().Perm()
+
+		data, err := os.ReadFile(absPath)
+		if err != nil {
+			for _, e := range fileEdits {
+				results[e.index] = editResult{path: filePath, status: "error", detail: fmt.Sprintf("Read error: %v", err)}
 				totalFailed++
 			}
 			continue
@@ -678,12 +718,12 @@ func toolMultiEdit(args map[string]interface{}, workDir string) (string, bool) {
 			continue
 		}
 
-		if err := os.WriteFile(absPath, []byte(content), 0644); err != nil {
+		if err := os.WriteFile(absPath, []byte(content), filePerm); err != nil {
 			for _, e := range fileEdits {
-				results[e.index] = editResult{path: filePath, status: "error", detail: fmt.Sprintf("Write failed: %v", err)}
 				if results[e.index].status == "ok" {
 					totalOk--
 				}
+				results[e.index] = editResult{path: filePath, status: "error", detail: fmt.Sprintf("Write failed: %v", err)}
 				totalFailed++
 			}
 			continue
@@ -960,10 +1000,31 @@ func toolWebSearch(args map[string]interface{}) (string, bool) {
 
 // ── shell ────────────────────────────────────────────────────
 
+// dangerousPatterns detects potentially destructive shell commands.
+var dangerousPatterns = []string{
+	"rm -rf /",
+	"rm -rf ~",
+	"rm -rf $HOME",
+	":(){:|:&};:",    // fork bomb
+	"mkfs.",
+	"dd if=",
+	"> /dev/sd",
+	"chmod -R 777 /",
+	":(){ :|:& };:", // fork bomb variant
+}
+
 func toolShell(args map[string]interface{}, workDir string) (string, bool) {
 	command := getString(args, "command")
 	if command == "" {
 		return "Error: command is required", false
+	}
+
+	// Block obviously dangerous commands
+	cmdLower := strings.ToLower(command)
+	for _, pat := range dangerousPatterns {
+		if strings.Contains(cmdLower, strings.ToLower(pat)) {
+			return fmt.Sprintf("Error: blocked potentially destructive command matching %q. If this was intentional, run it manually.", pat), false
+		}
 	}
 
 	cmd := exec.Command("bash", "-c", command)
@@ -974,6 +1035,8 @@ func toolShell(args map[string]interface{}, workDir string) (string, bool) {
 		"FORCE_COLOR=0",
 		"CI=1",
 	)
+	// Use process group so we can kill children on timeout
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	// Combine stdout + stderr, timeout at 2 minutes
 	started := time.Now()
@@ -999,7 +1062,8 @@ func toolShell(args map[string]interface{}, workDir string) (string, bool) {
 		return truncateOutput(fmt.Sprintf("%s\n\nExit code: 0 | Wall time: %.1fs", result, elapsed)), true
 	case <-time.After(2 * time.Minute):
 		if cmd.Process != nil {
-			cmd.Process.Kill()
+			// Kill entire process group to prevent zombies
+			syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		}
 		return "Error: command timed out after 2 minutes", false
 	}

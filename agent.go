@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 )
 
 // ──────────────────────────────────────────────────────────────
@@ -34,6 +35,7 @@ type AgentEvent struct {
 	Type    EventType
 	Text    string         // EventTextDelta
 	Tool    string         // EventToolStart / EventToolResult — tool name
+	ToolID  string         // EventToolStart / EventToolResult — tool call ID
 	Args    map[string]any // EventToolStart — parsed arguments
 	Output  string         // EventToolResult — tool output
 	Success bool           // EventToolResult
@@ -101,7 +103,8 @@ func strPtr(s string) *string { return &s }
 func buildSystemPrompt(workDir string) string {
 	var sb strings.Builder
 	sb.WriteString(systemPrompt)
-	sb.WriteString(fmt.Sprintf("\n\nWorking directory: %s\n", workDir))
+	sb.WriteString(fmt.Sprintf("\n\nCurrent date: %s\n", time.Now().Format("2006-01-02")))
+	sb.WriteString(fmt.Sprintf("Working directory: %s\n", workDir))
 
 	// Load project instructions if available
 	projectInstructions := loadProjectInstructions(workDir)
@@ -267,7 +270,7 @@ func (a *Agent) Run(prompt string) {
 				}
 
 			case StreamError:
-				a.events <- AgentEvent{Type: EventError, Error: evt.Error}
+				a.events <- AgentEvent{Type: EventError, Error: fmt.Errorf("%s", humanizeError(evt.Error))}
 				a.events <- AgentEvent{Type: EventDone, Text: "Error occurred."}
 				return
 
@@ -310,7 +313,7 @@ func (a *Agent) Run(prompt string) {
 		// Loop back for next turn
 	}
 
-	a.events <- AgentEvent{Type: EventDone, Text: "Reached maximum turns."}
+	a.events <- AgentEvent{Type: EventDone, Text: fmt.Sprintf("Reached maximum turns (%d). You can continue with a follow-up prompt.", maxTurns)}
 }
 
 // executeToolCalls runs tool calls with parallel execution for read-only tools.
@@ -341,12 +344,15 @@ func (a *Agent) executeToolCalls(toolCalls []ToolCall, consecutiveErrors *int) {
 
 		for i, tc := range parallel {
 			var argsMap map[string]any
-			json.Unmarshal([]byte(tc.Function.Arguments), &argsMap)
+			if err := json.Unmarshal([]byte(tc.Function.Arguments), &argsMap); err != nil {
+				argsMap = map[string]any{"_raw": tc.Function.Arguments}
+			}
 
 			a.events <- AgentEvent{
-				Type: EventToolStart,
-				Tool: tc.Function.Name,
-				Args: argsMap,
+				Type:   EventToolStart,
+				Tool:   tc.Function.Name,
+				ToolID: tc.ID,
+				Args:   argsMap,
 			}
 
 			wg.Add(1)
@@ -384,6 +390,7 @@ func (a *Agent) executeToolCalls(toolCalls []ToolCall, consecutiveErrors *int) {
 			a.events <- AgentEvent{
 				Type:    EventToolResult,
 				Tool:    r.tc.Function.Name,
+				ToolID:  r.tc.ID,
 				Args:    r.args,
 				Output:  r.output,
 				Success: r.success,
@@ -401,12 +408,15 @@ func (a *Agent) executeToolCalls(toolCalls []ToolCall, consecutiveErrors *int) {
 	// Run mutating tools sequentially
 	for _, tc := range sequential {
 		var argsMap map[string]any
-		json.Unmarshal([]byte(tc.Function.Arguments), &argsMap)
+		if err := json.Unmarshal([]byte(tc.Function.Arguments), &argsMap); err != nil {
+			argsMap = map[string]any{"_raw": tc.Function.Arguments}
+		}
 
 		a.events <- AgentEvent{
-			Type: EventToolStart,
-			Tool: tc.Function.Name,
-			Args: argsMap,
+			Type:   EventToolStart,
+			Tool:   tc.Function.Name,
+			ToolID: tc.ID,
+			Args:   argsMap,
 		}
 
 		var output string
@@ -438,6 +448,7 @@ func (a *Agent) executeToolCalls(toolCalls []ToolCall, consecutiveErrors *int) {
 		a.events <- AgentEvent{
 			Type:    EventToolResult,
 			Tool:    tc.Function.Name,
+			ToolID:  tc.ID,
 			Args:    argsMap,
 			Output:  output,
 			Success: success,

@@ -127,27 +127,31 @@ func (nm *notifyManager) renderOne(n Notification, width int) string {
 
 	icon := nm.icon(n.Type)
 	text := n.Text
-	if len(text) > width-10 {
-		text = text[:width-13] + "..."
+	if lipgloss.Width(text) > width-10 {
+		runes := []rune(text)
+		if len(runes) > width-13 {
+			text = string(runes[:width-13]) + "..."
+		}
 	}
 
-	// Style based on type
+	// Style based on type — fade from dim to type color
+	dimHex := string(colDim)
 	var style lipgloss.Style
 	switch n.Type {
 	case NotifyInfo:
-		fg := lerpColor("#484f58", "#58a6ff", opacity)
+		fg := lerpColor(dimHex, string(colAccent), opacity)
 		style = lipgloss.NewStyle().Foreground(lipgloss.Color(fg))
 	case NotifyProgress:
-		fg := lerpColor("#484f58", "#56d4dd", opacity)
+		fg := lerpColor(dimHex, string(colCyan), opacity)
 		style = lipgloss.NewStyle().Foreground(lipgloss.Color(fg))
 	case NotifySuccess:
-		fg := lerpColor("#484f58", "#3fb950", opacity)
+		fg := lerpColor(dimHex, string(colSuccess), opacity)
 		style = lipgloss.NewStyle().Foreground(lipgloss.Color(fg))
 	case NotifyWarn:
-		fg := lerpColor("#484f58", "#d29922", opacity)
+		fg := lerpColor(dimHex, string(colWarning), opacity)
 		style = lipgloss.NewStyle().Foreground(lipgloss.Color(fg))
 	case NotifyCelebrate:
-		fg := lerpColor("#484f58", "#a371f7", opacity)
+		fg := lerpColor(dimHex, string(colPurple), opacity)
 		style = lipgloss.NewStyle().Foreground(lipgloss.Color(fg)).Bold(true)
 	}
 
@@ -200,18 +204,20 @@ func renderSuggestions(suggestions []string, width int) string {
 		return ""
 	}
 
+	sep := styleDim.Render("  ·  ")
+
+	// Build progressively, dropping suggestions that don't fit
 	var parts []string
 	for i, s := range suggestions {
 		num := lipgloss.NewStyle().Foreground(colDim).Render(fmt.Sprintf("[%d]", i+1))
 		text := lipgloss.NewStyle().Foreground(colSecondary).Render(s)
-		parts = append(parts, num+" "+text)
+		candidate := num + " " + text
+		trial := "  " + strings.Join(append(parts, candidate), sep)
+		if lipgloss.Width(trial) > width-4 && len(parts) > 0 {
+			break // don't add this one — previous suggestions fit
+		}
+		parts = append(parts, candidate)
 	}
 
-	line := "  " + strings.Join(parts, styleDim.Render("  ·  "))
-	if lipgloss.Width(line) > width-4 {
-		// Truncate to fit
-		line = line[:width-7] + "..."
-	}
-
-	return line
+	return "  " + strings.Join(parts, sep)
 }

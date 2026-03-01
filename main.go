@@ -1,10 +1,13 @@
 package main
 
 import (
+	"bufio"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -24,12 +27,7 @@ type Config struct {
 	BaseURL string
 	Model   string
 	WorkDir string
-
-	// Glue sidecar (optional — falls back to main OPENAI_* vars)
-	GlueAPIKey     string
-	GlueBaseURL    string
-	GlueFastModel  string
-	GlueSmartModel string
+	Resume  bool // --resume flag: restore previous session
 }
 
 func loadConfig() (*Config, error) {
@@ -37,6 +35,7 @@ func loadConfig() (*Config, error) {
 	model := flag.String("model", "", "LLM model name (default: gpt-4o)")
 	dir := flag.String("dir", "", "Working directory (default: current dir)")
 	baseURL := flag.String("base-url", "", "OpenAI-compatible API base URL")
+	resume := flag.Bool("resume", false, "Resume previous session for this directory")
 	showVersion := flag.Bool("version", false, "Print version and exit")
 	flag.Parse()
 
@@ -47,10 +46,18 @@ func loadConfig() (*Config, error) {
 
 	cfg := &Config{}
 
-	// API key (required)
+	// API key: env var → saved config → interactive prompt
 	cfg.APIKey = os.Getenv("OPENAI_API_KEY")
 	if cfg.APIKey == "" {
-		return nil, fmt.Errorf("OPENAI_API_KEY environment variable is required")
+		saved := loadSavedConfig()
+		cfg.APIKey = saved.APIKey
+	}
+	if cfg.APIKey == "" {
+		key, err := promptForAPIKey()
+		if err != nil {
+			return nil, err
+		}
+		cfg.APIKey = key
 	}
 
 	// Base URL
@@ -59,7 +66,12 @@ func loadConfig() (*Config, error) {
 		cfg.BaseURL = *baseURL
 	}
 	if cfg.BaseURL == "" {
-		cfg.BaseURL = "https://api.openai.com/v1"
+		saved := loadSavedConfig()
+		if saved.BaseURL != "" {
+			cfg.BaseURL = saved.BaseURL
+		} else {
+			cfg.BaseURL = "https://api.openai.com/v1"
+		}
 	}
 
 	// Model
@@ -68,7 +80,12 @@ func loadConfig() (*Config, error) {
 		cfg.Model = *model
 	}
 	if cfg.Model == "" {
-		cfg.Model = "gpt-4o"
+		saved := loadSavedConfig()
+		if saved.Model != "" {
+			cfg.Model = saved.Model
+		} else {
+			cfg.Model = "gpt-4o"
+		}
 	}
 
 	// Working directory
@@ -92,13 +109,102 @@ func loadConfig() (*Config, error) {
 		return nil, fmt.Errorf("working directory does not exist: %s", cfg.WorkDir)
 	}
 
-	// Glue sidecar config (all optional)
-	cfg.GlueAPIKey = os.Getenv("GLUE_API_KEY")
-	cfg.GlueBaseURL = os.Getenv("GLUE_BASE_URL")
-	cfg.GlueFastModel = os.Getenv("GLUE_FAST_MODEL")
-	cfg.GlueSmartModel = os.Getenv("GLUE_SMART_MODEL")
+	// Resume flag
+	cfg.Resume = *resume
 
 	return cfg, nil
+}
+
+// ──────────────────────────────────────────────────────────────
+//  Saved config (~/.codebase/config.json)
+// ──────────────────────────────────────────────────────────────
+
+type savedConfig struct {
+	APIKey  string `json:"api_key,omitempty"`
+	BaseURL string `json:"base_url,omitempty"`
+	Model   string `json:"model,omitempty"`
+}
+
+func configPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".codebase", "config.json")
+}
+
+func loadSavedConfig() savedConfig {
+	path := configPath()
+	if path == "" {
+		return savedConfig{}
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return savedConfig{}
+	}
+	var sc savedConfig
+	json.Unmarshal(data, &sc)
+	return sc
+}
+
+func saveSavedConfig(sc savedConfig) error {
+	path := configPath()
+	if path == "" {
+		return fmt.Errorf("cannot determine home directory")
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(sc, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0600)
+}
+
+func promptForAPIKey() (string, error) {
+	reader := bufio.NewReader(os.Stdin)
+
+	fmt.Println()
+	fmt.Println("  Welcome to Codebase!")
+	fmt.Println()
+	fmt.Println("  No API key found. You need an OpenAI-compatible API key to use Codebase.")
+	fmt.Println("  Get one from: https://platform.openai.com/api-keys")
+	fmt.Println()
+	fmt.Print("  Enter your API key: ")
+
+	key, err := reader.ReadString('\n')
+	if err != nil {
+		return "", fmt.Errorf("failed to read input: %w", err)
+	}
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return "", fmt.Errorf("no API key provided")
+	}
+
+	// Ask about base URL for non-OpenAI providers
+	fmt.Println()
+	fmt.Println("  Using OpenAI by default. If you use a different provider (Groq, local, etc.),")
+	fmt.Print("  enter the base URL (or press Enter to skip): ")
+
+	baseInput, _ := reader.ReadString('\n')
+	baseURL := strings.TrimSpace(baseInput)
+
+	// Save for next time
+	sc := loadSavedConfig()
+	sc.APIKey = key
+	if baseURL != "" {
+		sc.BaseURL = baseURL
+	}
+	if err := saveSavedConfig(sc); err != nil {
+		fmt.Fprintf(os.Stderr, "  Warning: could not save config: %v\n", err)
+	} else {
+		fmt.Println()
+		fmt.Println("  Saved to ~/.codebase/config.json")
+	}
+	fmt.Println()
+
+	return key, nil
 }
 
 // ──────────────────────────────────────────────────────────────

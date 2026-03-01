@@ -467,9 +467,3 @@ func stripHTML(s string) string {
 	return strings.TrimSpace(result.String())
 }
 
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}

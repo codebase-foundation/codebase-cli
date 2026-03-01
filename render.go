@@ -119,9 +119,12 @@ func renderFilePreview(args map[string]any, output string, state string, width i
 		}
 		lineNo := styleLineNo.Render(fmt.Sprintf(" %3d", i+1))
 		sep := styleDim.Render(" │ ")
-		// Truncate long lines
-		if len(line) > width-10 {
-			line = line[:width-13] + "..."
+		// Truncate long lines (rune-safe)
+		if lipgloss.Width(line) > width-10 {
+			runes := []rune(line)
+			if len(runes) > width-13 {
+				line = string(runes[:width-13]) + "..."
+			}
 		}
 		sb.WriteString(lineNo + sep + line)
 		if i < len(lines)-1 || i < maxLines-1 {
@@ -146,6 +149,43 @@ func renderReadResult(args map[string]any, output string, state string, width in
 func renderEditResult(args map[string]any, output string, state string, width int) string {
 	if state == "pending" {
 		return ""
+	}
+	// Show a compact diff view of old → new
+	if args != nil && state == "success" {
+		oldText, _ := args["old_text"].(string)
+		newText, _ := args["new_text"].(string)
+		if oldText != "" || newText != "" {
+			var sb strings.Builder
+			sb.WriteString(styleMuted.Render(" " + output) + "\n")
+			maxDiffLines := 4
+			// Old lines (red)
+			oldLines := strings.Split(oldText, "\n")
+			for i, line := range oldLines {
+				if i >= maxDiffLines {
+					sb.WriteString(styleErr.Render(fmt.Sprintf("   - ... (%d more)", len(oldLines)-maxDiffLines)) + "\n")
+					break
+				}
+				runes := []rune(line)
+				if len(runes) > width-6 {
+					line = string(runes[:width-9]) + "..."
+				}
+				sb.WriteString(styleErr.Render("   - "+line) + "\n")
+			}
+			// New lines (green)
+			newLines := strings.Split(newText, "\n")
+			for i, line := range newLines {
+				if i >= maxDiffLines {
+					sb.WriteString(styleOK.Render(fmt.Sprintf("   + ... (%d more)", len(newLines)-maxDiffLines)) + "\n")
+					break
+				}
+				runes := []rune(line)
+				if len(runes) > width-6 {
+					line = string(runes[:width-9]) + "..."
+				}
+				sb.WriteString(styleOK.Render("   + "+line) + "\n")
+			}
+			return strings.TrimRight(sb.String(), "\n")
+		}
 	}
 	return styleMuted.Render(" " + output)
 }
@@ -247,8 +287,12 @@ func truncateLines(s string, max int, width int) string {
 			sb.WriteString(styleDim.Render(fmt.Sprintf(" ... (%d more lines)", len(lines)-max)))
 			break
 		}
-		if len(line) > width-2 {
-			line = line[:width-5] + "..."
+		if lipgloss.Width(line) > width-2 {
+			// Truncate by runes to avoid cutting multi-byte chars
+			runes := []rune(line)
+			if len(runes) > width-5 {
+				line = string(runes[:width-5]) + "..."
+			}
 		}
 		sb.WriteString(" " + line)
 		if i < len(lines)-1 {
@@ -269,19 +313,29 @@ func wrapText(s string, width int) string {
 			result.WriteString("\n")
 			continue
 		}
-		words := strings.Fields(paragraph)
+		// Preserve leading whitespace
+		trimmed := strings.TrimLeft(paragraph, " \t")
+		indent := paragraph[:len(paragraph)-len(trimmed)]
+		indentW := lipgloss.Width(indent)
+		effectiveWidth := width - indentW
+		if effectiveWidth < 10 {
+			effectiveWidth = 10
+		}
+
+		words := strings.Fields(trimmed)
 		lineLen := 0
 		for i, word := range words {
-			wl := len(word)
-			if lineLen+wl+1 > width && lineLen > 0 {
+			wl := lipgloss.Width(word)
+			if lineLen+wl+1 > effectiveWidth && lineLen > 0 {
 				result.WriteString("\n")
+				result.WriteString(indent)
 				lineLen = 0
 			}
 			if lineLen > 0 {
 				result.WriteString(" ")
 				lineLen++
-			} else if i > 0 {
-				// start of new wrapped line
+			} else if i == 0 {
+				result.WriteString(indent)
 			}
 			result.WriteString(word)
 			lineLen += wl

@@ -39,6 +39,7 @@ type toolSegment struct {
 	args    map[string]any
 	output  string
 	state   string // "pending", "success", "error"
+	toolID  string // tool call ID for matching results to starts
 }
 
 type chatModel struct {
@@ -58,7 +59,11 @@ type chatModel struct {
 	eventCh   chan AgentEvent
 	stopCh    chan struct{}
 	agent     *Agent
-	flashFrames int
+	flashFrames  int
+	userScrolled bool // true when user has scrolled up — don't auto-scroll
+	toolsPending     int       // tools currently running
+	toolsDone        int       // tools completed this turn
+	lastStreamRebuild time.Time // debounce streaming viewport rebuilds
 
 	// Glue + notifications
 	glue          *GlueClient
@@ -89,6 +94,11 @@ type planQuestionMsg struct {
 }
 type planGeneratedMsg struct {
 	plan string
+}
+type intentClassifiedMsg struct {
+	prompt  string
+	intent  Intent
+	context []ChatMessage
 }
 
 func newChatModel(cfg *Config) chatModel {
@@ -222,71 +232,30 @@ func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 				cmds = append(cmds, m.handlePlanReview(prompt))
 
 			case chatIdle:
+				// Check for suggestion number selection (e.g. "1", "2", "3")
+				if len(m.suggestions) > 0 {
+					if idx := parseSuggestionIndex(prompt, len(m.suggestions)); idx >= 0 {
+						prompt = m.suggestions[idx]
+					}
+				}
 				m.suggestions = nil
 
-				// Route through glue intent classification
+				// Slash commands — intercept before intent classification
+				if strings.HasPrefix(prompt, "/") {
+					cmd, handled := m.handleCommand(prompt)
+					if handled {
+						return m, cmd
+					}
+				}
+
+				// Route through glue intent classification (async — non-blocking)
 				hasHistory := m.agent != nil
 				ctx := m.recentContext()
-				intent := m.glue.ClassifyIntent(prompt, hasHistory)
-
-				switch intent {
-				case IntentChat:
-					m.segments = append(m.segments, segment{
-						kind: "user",
-						text: "\n" + styleUserLabel.Render("  ❯ ") + prompt + "\n\n",
-					})
-					glue := m.glue
-					cmds = append(cmds, func() tea.Msg {
-						reply := glue.ChatReply(prompt, ctx)
-						return glueResultMsg{kind: "chat", text: reply}
-					})
-
-				case IntentClarify:
-					m.segments = append(m.segments, segment{
-						kind: "user",
-						text: "\n" + styleUserLabel.Render("  ❯ ") + prompt + "\n\n",
-					})
-					glue := m.glue
-					cmds = append(cmds, func() tea.Msg {
-						reply := glue.ClarifyReply(prompt)
-						return glueResultMsg{kind: "clarify", text: reply}
-					})
-
-				case IntentPlan:
-					m.startPlanning(prompt)
-					glue := m.glue
-					ps := m.planState
-					cmds = append(cmds, func() tea.Msg {
-						q, done, summary := glue.GenerateQuestion(ps.OriginalPrompt, ps.QAHistory, ps.QuestionCount+1)
-						return planQuestionMsg{question: q, done: done, summary: summary}
-					})
-					// Generate title in background
-					if m.title == "" {
-						glue := m.glue
-						cmds = append(cmds, func() tea.Msg {
-							title := glue.GenerateTitle(prompt)
-							return glueResultMsg{kind: "title", text: title}
-						})
-					}
-
-				default: // IntentAgent
-					m.startAgent(prompt)
-					cmds = append(cmds, m.waitForEvent())
-					cmds = append(cmds, tea.Tick(10*time.Second, func(t time.Time) tea.Msg {
-						return narrateTickMsg{}
-					}))
-					if m.title == "" {
-						glue := m.glue
-						cmds = append(cmds, func() tea.Msg {
-							title := glue.GenerateTitle(prompt)
-							return glueResultMsg{kind: "title", text: title}
-						})
-					}
-					m.notify.Push(Notification{
-						Type: NotifyInfo,
-						Text: "Starting agent...",
-					})
-				}
+				glue := m.glue
+				cmds = append(cmds, func() tea.Msg {
+					intent := glue.ClassifyIntent(prompt, hasHistory)
+					return intentClassifiedMsg{prompt: prompt, intent: intent, context: ctx}
+				})
 
 			default:
 				// Streaming or flash — ignore enter
@@ -347,6 +316,69 @@ func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 		m.input.Placeholder = "go / or describe revisions..."
 		m.rebuildViewport()
 
+	case intentClassifiedMsg:
+		prompt := msg.prompt
+		ctx := msg.context
+
+		switch msg.intent {
+		case IntentChat:
+			m.segments = append(m.segments, segment{
+				kind: "user",
+				text: "\n" + styleUserLabel.Render("  ❯ ") + prompt + "\n\n",
+			})
+			glue := m.glue
+			cmds = append(cmds, func() tea.Msg {
+				reply := glue.ChatReply(prompt, ctx)
+				return glueResultMsg{kind: "chat", text: reply}
+			})
+
+		case IntentClarify:
+			m.segments = append(m.segments, segment{
+				kind: "user",
+				text: "\n" + styleUserLabel.Render("  ❯ ") + prompt + "\n\n",
+			})
+			glue := m.glue
+			cmds = append(cmds, func() tea.Msg {
+				reply := glue.ClarifyReply(prompt)
+				return glueResultMsg{kind: "clarify", text: reply}
+			})
+
+		case IntentPlan:
+			m.startPlanning(prompt)
+			glue := m.glue
+			ps := m.planState
+			cmds = append(cmds, func() tea.Msg {
+				q, done, summary := glue.GenerateQuestion(ps.OriginalPrompt, ps.QAHistory, ps.QuestionCount+1)
+				return planQuestionMsg{question: q, done: done, summary: summary}
+			})
+			if m.title == "" {
+				glue := m.glue
+				cmds = append(cmds, func() tea.Msg {
+					title := glue.GenerateTitle(prompt)
+					return glueResultMsg{kind: "title", text: title}
+				})
+			}
+
+		default: // IntentAgent
+			m.startAgent(prompt)
+			cmds = append(cmds, m.waitForEvent())
+			cmds = append(cmds, tea.Tick(10*time.Second, func(t time.Time) tea.Msg {
+				return narrateTickMsg{}
+			}))
+			if m.title == "" {
+				glue := m.glue
+				cmds = append(cmds, func() tea.Msg {
+					title := glue.GenerateTitle(prompt)
+					return glueResultMsg{kind: "title", text: title}
+				})
+			}
+			m.notify.Push(Notification{
+				Type: NotifyInfo,
+				Text: "Starting agent...",
+			})
+		}
+		m.rebuildViewport()
+
 	case agentEventMsg:
 		cmds = append(cmds, m.handleAgentEvent(AgentEvent(msg)))
 
@@ -356,9 +388,9 @@ func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 			m.segments = append(m.segments, segment{
 				kind: "text",
 				text: func() string {
-					wrapped := wrapText(msg.text, m.width-8)
+					rendered := renderMarkdownText(msg.text, m.width-8)
 					var sb strings.Builder
-					for _, line := range strings.Split(wrapped, "\n") {
+					for _, line := range strings.Split(rendered, "\n") {
 						sb.WriteString("  " + line + "\n")
 					}
 					return sb.String()
@@ -401,10 +433,7 @@ func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 			glue := m.glue
 			cmds = append(cmds, func() tea.Msg {
 				narration := glue.Narrate(actions)
-				if narration != "" {
-					return glueResultMsg{kind: "narrate", text: narration}
-				}
-				return nil
+				return glueResultMsg{kind: "narrate", text: narration}
 			})
 		}
 		if m.state == chatStreaming {
@@ -436,8 +465,8 @@ func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
 		cmds = append(cmds, cmd)
-		// Re-render viewport if we have pending tools (spinner updates)
-		if m.state == chatStreaming {
+		// Only re-render for spinner if there are pending tools (avoids 80ms full rebuild)
+		if m.state == chatStreaming && m.toolsPending > 0 {
 			m.rebuildViewport()
 		}
 	}
@@ -452,6 +481,8 @@ func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 		var cmd tea.Cmd
 		m.viewport, cmd = m.viewport.Update(msg)
 		cmds = append(cmds, cmd)
+		// Track whether user scrolled away from bottom
+		m.userScrolled = !m.viewport.AtBottom()
 	}
 
 	return m, tea.Batch(cmds...)
@@ -480,6 +511,16 @@ func (m *chatModel) rebuildViewport() {
 	if !m.ready {
 		return
 	}
+	// Adjust viewport height for notifications
+	notifyH := len(m.notify.active)
+	targetH := m.height - 5 - notifyH
+	if targetH < 5 {
+		targetH = 5
+	}
+	if m.viewport.Height != targetH {
+		m.viewport.Height = targetH
+	}
+
 	var sb strings.Builder
 	contentW := m.width - 8
 
@@ -514,7 +555,9 @@ func (m *chatModel) rebuildViewport() {
 	}
 
 	m.viewport.SetContent(sb.String())
-	m.viewport.GotoBottom()
+	if !m.userScrolled {
+		m.viewport.GotoBottom()
+	}
 }
 
 func (m *chatModel) startAgent(prompt string) {
@@ -525,6 +568,7 @@ func (m *chatModel) startAgent(prompt string) {
 	m.turns = 0
 	m.recentActions = nil
 	m.lastNarration = time.Now() // don't narrate immediately
+	m.userScrolled = false
 
 	m.segments = append(m.segments, segment{
 		kind: "user",
@@ -537,14 +581,16 @@ func (m *chatModel) startAgent(prompt string) {
 		client := NewLLMClient(m.config.APIKey, m.config.BaseURL, m.config.Model)
 		m.agent = NewAgent(client, m.config.WorkDir, m.eventCh, m.stopCh)
 
-		// Try to restore a previous session
-		if session := LoadSession(m.config.WorkDir, m.config.Model); session != nil {
-			m.agent.history = session.History
-			m.tokens = session.Tokens
-			m.segments = append(m.segments, segment{
-				kind: "text",
-				text: styleMuted.Render("  Session restored from previous conversation.\n\n"),
-			})
+		// Only restore session if --resume flag was passed
+		if m.config.Resume {
+			if session := LoadSession(m.config.WorkDir, m.config.Model); session != nil {
+				m.agent.history = session.History
+				m.tokens = session.Tokens
+				m.segments = append(m.segments, segment{
+					kind: "text",
+					text: styleMuted.Render("  Session restored from previous conversation.\n\n"),
+				})
+			}
 		}
 	} else {
 		m.agent.events = m.eventCh
@@ -708,10 +754,19 @@ func (m *chatModel) handlePlanReview(input string) tea.Cmd {
 }
 
 func (m *chatModel) handleAgentEvent(evt AgentEvent) tea.Cmd {
+	// Guard: ignore events if we're no longer streaming (e.g. after ctrl+c)
+	if m.state != chatStreaming && evt.Type != EventDone {
+		return nil
+	}
+
 	switch evt.Type {
 	case EventTextDelta:
 		m.streaming.WriteString(evt.Text)
-		m.rebuildViewport()
+		// Debounce: only rebuild viewport at most every 50ms during streaming
+		if time.Since(m.lastStreamRebuild) > 50*time.Millisecond {
+			m.rebuildViewport()
+			m.lastStreamRebuild = time.Now()
+		}
 		return m.waitForEvent()
 
 	case EventTurnStart:
@@ -728,12 +783,14 @@ func (m *chatModel) handleAgentEvent(evt AgentEvent) tea.Cmd {
 
 	case EventToolStart:
 		m.flushStreamingText()
+		m.toolsPending++
 		m.segments = append(m.segments, segment{
 			kind: "tool",
 			tool: &toolSegment{
-				name:  evt.Tool,
-				args:  evt.Args,
-				state: "pending",
+				name:   evt.Tool,
+				args:   evt.Args,
+				state:  "pending",
+				toolID: evt.ToolID,
 			},
 		})
 		// Track for narration
@@ -758,17 +815,38 @@ func (m *chatModel) handleAgentEvent(evt AgentEvent) tea.Cmd {
 		return m.waitForEvent()
 
 	case EventToolResult:
-		// Find the last pending tool segment and update it
-		for i := len(m.segments) - 1; i >= 0; i-- {
-			if m.segments[i].kind == "tool" && m.segments[i].tool.state == "pending" {
-				state := "success"
-				if !evt.Success {
-					state = "error"
+		m.toolsPending--
+		m.toolsDone++
+		// Match by toolID first, then fall back to last pending
+		matched := false
+		if evt.ToolID != "" {
+			for i := len(m.segments) - 1; i >= 0; i-- {
+				if m.segments[i].kind == "tool" && m.segments[i].tool.toolID == evt.ToolID {
+					state := "success"
+					if !evt.Success {
+						state = "error"
+					}
+					m.segments[i].tool.state = state
+					m.segments[i].tool.output = evt.Output
+					m.segments[i].tool.args = evt.Args
+					matched = true
+					break
 				}
-				m.segments[i].tool.state = state
-				m.segments[i].tool.output = evt.Output
-				m.segments[i].tool.args = evt.Args
-				break
+			}
+		}
+		if !matched {
+			// Fallback: find last pending tool segment
+			for i := len(m.segments) - 1; i >= 0; i-- {
+				if m.segments[i].kind == "tool" && m.segments[i].tool.state == "pending" {
+					state := "success"
+					if !evt.Success {
+						state = "error"
+					}
+					m.segments[i].tool.state = state
+					m.segments[i].tool.output = evt.Output
+					m.segments[i].tool.args = evt.Args
+					break
+				}
 			}
 		}
 		m.rebuildViewport()
@@ -781,6 +859,8 @@ func (m *chatModel) handleAgentEvent(evt AgentEvent) tea.Cmd {
 	case EventDone:
 		m.flushStreamingText()
 		m.notify.ClearProgress()
+		m.toolsPending = 0
+		m.toolsDone = 0
 		m.files = 0
 		if m.agent != nil {
 			m.files = m.agent.FilesChanged()
@@ -788,7 +868,7 @@ func (m *chatModel) handleAgentEvent(evt AgentEvent) tea.Cmd {
 			SaveSession(m.agent, m.tokens)
 		}
 		m.state = chatDoneFlash
-		m.flashFrames = 3
+		m.flashFrames = 1
 		m.rebuildViewport()
 
 		// Glue: celebration + follow-up suggestions (in background)
@@ -834,9 +914,9 @@ func (m *chatModel) flushStreamingText() {
 		m.segments = append(m.segments, segment{
 			kind: "text",
 			text: func() string {
-				wrapped := wrapText(text, m.width-8)
+				rendered := renderMarkdownText(text, m.width-8)
 				var sb strings.Builder
-				for _, line := range strings.Split(wrapped, "\n") {
+				for _, line := range strings.Split(rendered, "\n") {
 					sb.WriteString("  " + line + "\n")
 				}
 				return sb.String()
@@ -865,7 +945,12 @@ func (m chatModel) View() string {
 	statusParts := []string{modelStr, tokenStr, fileStr}
 	switch m.state {
 	case chatStreaming:
-		statusParts = append(statusParts, m.spinner.View()+styleMuted.Render(" working"))
+		if m.toolsPending > 0 {
+			total := m.toolsDone + m.toolsPending
+			statusParts = append(statusParts, m.spinner.View()+styleMuted.Render(fmt.Sprintf(" tools %d/%d", m.toolsDone, total)))
+		} else {
+			statusParts = append(statusParts, m.spinner.View()+styleMuted.Render(" working"))
+		}
 	case chatPlanning:
 		statusParts = append(statusParts, lipgloss.NewStyle().Foreground(colPurple).Render("◆ planning"))
 	case chatPlanReview:
@@ -879,6 +964,21 @@ func (m chatModel) View() string {
 	}
 
 	gap := m.width - lipgloss.Width(titleLeft) - lipgloss.Width(statusRight) - 6
+	// If title is too long, truncate it to fit
+	if gap < 1 && m.title != "" {
+		maxTitle := m.width - lipgloss.Width(styleAccentText.Render(" codebase")) - lipgloss.Width(statusRight) - lipgloss.Width(styleDim.Render(" · ")) - 10
+		if maxTitle > 3 {
+			truncated := m.title
+			runes := []rune(truncated)
+			if len(runes) > maxTitle {
+				truncated = string(runes[:maxTitle-3]) + "..."
+			}
+			titleLeft = styleAccentText.Render(" codebase") + styleDim.Render(" · ") + styleMuted.Render(truncated)
+		} else {
+			titleLeft = styleAccentText.Render(" codebase")
+		}
+		gap = m.width - lipgloss.Width(titleLeft) - lipgloss.Width(statusRight) - 6
+	}
 	if gap < 1 {
 		gap = 1
 	}
@@ -886,6 +986,16 @@ func (m chatModel) View() string {
 
 	// ── Notifications ────────────────────────────────────────
 	notifyBar := m.notify.Render(m.width)
+
+	// ── Scroll indicator ─────────────────────────────────────
+	scrollIndicator := ""
+	if m.userScrolled && m.viewport.TotalLineCount() > m.viewport.Height {
+		pct := 0
+		if m.viewport.TotalLineCount()-m.viewport.Height > 0 {
+			pct = int(float64(m.viewport.YOffset) / float64(m.viewport.TotalLineCount()-m.viewport.Height) * 100)
+		}
+		scrollIndicator = styleDim.Render(fmt.Sprintf(" ↑ %d%% — ↓ scroll to resume auto-scroll", pct)) + "\n"
+	}
 
 	// ── Body ─────────────────────────────────────────────────
 	body := m.viewport.View()
@@ -905,9 +1015,9 @@ func (m chatModel) View() string {
 
 	var innerContent string
 	if notifyBar != "" {
-		innerContent = header + "\n" + notifyBar + body
+		innerContent = header + "\n" + notifyBar + scrollIndicator + body
 	} else {
-		innerContent = header + "\n" + body
+		innerContent = header + "\n" + scrollIndicator + body
 	}
 	framedBody := frame.Render(innerContent)
 
@@ -919,14 +1029,18 @@ func (m chatModel) View() string {
 
 	// ── Input ────────────────────────────────────────────────
 	inputLine := " " + m.input.View()
-	hintAction := "quit"
+	sep := styleDim.Render(" · ")
+	var hint string
 	switch m.state {
 	case chatStreaming:
-		hintAction = "stop"
-	case chatPlanning, chatPlanReview:
-		hintAction = "cancel plan"
+		hint = styleDim.Render("ctrl+c stop") + sep + styleDim.Render("↑↓ scroll")
+	case chatPlanning:
+		hint = styleDim.Render("ctrl+c cancel") + sep + styleDim.Render("enter answer")
+	case chatPlanReview:
+		hint = styleDim.Render("ctrl+c cancel") + sep + styleDim.Render("\"go\" approve") + sep + styleDim.Render("\"skip\" skip")
+	default:
+		hint = styleDim.Render("ctrl+c quit") + sep + styleDim.Render("/help commands") + sep + styleDim.Render("↑↓ scroll")
 	}
-	hint := styleDim.Render("ctrl+c " + hintAction)
 	inputGap := m.width - lipgloss.Width(inputLine) - lipgloss.Width(hint) - 2
 	if inputGap < 1 {
 		inputGap = 1
@@ -936,6 +1050,17 @@ func (m chatModel) View() string {
 	return framedBody + "\n" + suggestBar + inputRow
 }
 
-var styleAccentText = lipgloss.NewStyle().
-	Foreground(colAccent).
-	Bold(true)
+// parseSuggestionIndex checks if input is a suggestion number (1-based).
+// Returns 0-based index or -1 if not a valid suggestion number.
+func parseSuggestionIndex(input string, count int) int {
+	input = strings.TrimSpace(input)
+	if len(input) != 1 || input[0] < '1' || input[0] > '9' {
+		return -1
+	}
+	idx := int(input[0]-'0') - 1
+	if idx >= count {
+		return -1
+	}
+	return idx
+}
+

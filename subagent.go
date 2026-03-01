@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 )
@@ -103,8 +104,10 @@ func RunSubagent(client *LLMClient, workDir, task string) (string, error) {
 		for _, tc := range toolCalls {
 			// Safety: only allow read-only tools
 			switch tc.Function.Name {
-			case "read_file", "list_files", "search_files", "web_search", "shell":
-				// shell is allowed but subagent should only use read-only commands
+			case "read_file", "list_files", "search_files", "web_search":
+				// fully read-only
+			case "shell":
+				// Enforce read-only: wrap in a restricted shell
 			default:
 				history = append(history, ChatMessage{
 					Role:       "tool",
@@ -115,7 +118,12 @@ func RunSubagent(client *LLMClient, workDir, task string) (string, error) {
 				continue
 			}
 
-			output, _ := ExecuteTool(tc.Function.Name, tc.Function.Arguments, workDir)
+			var output string
+			if tc.Function.Name == "shell" {
+				output = executeReadOnlyShell(tc.Function.Arguments, workDir)
+			} else {
+				output, _ = ExecuteTool(tc.Function.Name, tc.Function.Arguments, workDir)
+			}
 			history = append(history, ChatMessage{
 				Role:       "tool",
 				ToolCallID: tc.ID,
@@ -131,4 +139,43 @@ func RunSubagent(client *LLMClient, workDir, task string) (string, error) {
 	}
 
 	return result, nil
+}
+
+// shellWritePatterns detects commands that modify the filesystem.
+var shellWritePatterns = []string{
+	"rm ", "rm\t", "rmdir", "mv ", "mv\t", "cp ", "cp\t",
+	"mkdir", "touch ", "chmod", "chown",
+	"tee ", "tee\t", "truncate",
+	"git checkout", "git reset", "git clean", "git stash",
+	"git merge", "git rebase", "git commit", "git push",
+	"npm install", "yarn add", "pip install",
+	"go install", "go get",
+	"sed -i", "patch ",
+}
+
+// executeReadOnlyShell runs a shell command but blocks write-like commands.
+func executeReadOnlyShell(argsJSON string, workDir string) string {
+	var args map[string]interface{}
+	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+		return "Error: invalid arguments"
+	}
+	command := getString(args, "command")
+	if command == "" {
+		return "Error: command is required"
+	}
+
+	cmdLower := strings.ToLower(command)
+	// Block output redirection
+	if strings.Contains(command, ">") || strings.Contains(command, ">>") {
+		return "Error: output redirection is not allowed in read-only mode. Use the command output directly."
+	}
+
+	for _, pat := range shellWritePatterns {
+		if strings.Contains(cmdLower, pat) {
+			return fmt.Sprintf("Error: command blocked — %q appears to modify files. Subagent is read-only.", pat)
+		}
+	}
+
+	output, _ := ExecuteTool("shell", argsJSON, workDir)
+	return output
 }

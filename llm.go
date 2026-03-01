@@ -115,6 +115,10 @@ type LLMClient struct {
 }
 
 func NewLLMClient(apiKey, baseURL, model string) *LLMClient {
+	return newLLMClientWithTimeout(apiKey, baseURL, model, 5*time.Minute)
+}
+
+func newLLMClientWithTimeout(apiKey, baseURL, model string, timeout time.Duration) *LLMClient {
 	if baseURL == "" {
 		baseURL = "https://api.openai.com/v1"
 	}
@@ -125,7 +129,7 @@ func NewLLMClient(apiKey, baseURL, model string) *LLMClient {
 		APIKey:  apiKey,
 		BaseURL: strings.TrimSuffix(baseURL, "/"),
 		Model:   model,
-		client:  &http.Client{Timeout: 5 * time.Minute},
+		client:  &http.Client{Timeout: timeout},
 	}
 }
 
@@ -155,25 +159,41 @@ func (c *LLMClient) StreamChat(messages []ChatMessage, tools []ToolDef, ch chan<
 		return
 	}
 
-	req, err := http.NewRequest("POST", c.BaseURL+"/chat/completions", bytes.NewReader(jsonBody))
-	if err != nil {
-		ch <- StreamEvent{Type: StreamError, Error: fmt.Errorf("request: %w", err)}
-		return
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+c.APIKey)
-	req.Header.Set("Accept", "text/event-stream")
+	// Retry transient errors (429, 502, 503) up to 3 times with backoff
+	var resp *http.Response
+	maxRetries := 3
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		req, err := http.NewRequest("POST", c.BaseURL+"/chat/completions", bytes.NewReader(jsonBody))
+		if err != nil {
+			ch <- StreamEvent{Type: StreamError, Error: fmt.Errorf("request: %w", err)}
+			return
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+c.APIKey)
+		req.Header.Set("Accept", "text/event-stream")
 
-	resp, err := c.client.Do(req)
-	if err != nil {
-		ch <- StreamEvent{Type: StreamError, Error: fmt.Errorf("http: %w", err)}
-		return
+		resp, err = c.client.Do(req)
+		if err != nil {
+			ch <- StreamEvent{Type: StreamError, Error: fmt.Errorf("connection error: %v", err)}
+			return
+		}
+
+		// Retry on transient HTTP errors
+		if resp.StatusCode == 429 || resp.StatusCode == 502 || resp.StatusCode == 503 {
+			resp.Body.Close()
+			if attempt < maxRetries {
+				backoff := time.Duration(1<<uint(attempt)) * time.Second
+				time.Sleep(backoff)
+				continue
+			}
+		}
+		break
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
 		errBody, _ := io.ReadAll(resp.Body)
-		ch <- StreamEvent{Type: StreamError, Error: fmt.Errorf("API %d: %s", resp.StatusCode, string(errBody))}
+		ch <- StreamEvent{Type: StreamError, Error: fmt.Errorf("API error %d: %s", resp.StatusCode, truncateErrorBody(string(errBody)))}
 		return
 	}
 
@@ -237,7 +257,9 @@ func (c *LLMClient) StreamChat(messages []ChatMessage, tools []ToolDef, ch chan<
 
 		// Check for finish
 		if choice.FinishReason != nil {
-			if *choice.FinishReason == "tool_calls" && len(accumulated) > 0 {
+			if len(accumulated) > 0 {
+				// Emit tool calls on any finish reason — some providers
+				// use "stop" instead of "tool_calls"
 				ch <- StreamEvent{Type: StreamToolCalls, ToolCalls: accumulated}
 				accumulated = nil
 			}
@@ -246,3 +268,41 @@ func (c *LLMClient) StreamChat(messages []ChatMessage, tools []ToolDef, ch chan<
 
 	ch <- StreamEvent{Type: StreamDone}
 }
+
+// truncateErrorBody shortens raw API error bodies for display.
+func truncateErrorBody(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) > 300 {
+		return s[:300] + "..."
+	}
+	return s
+}
+
+// humanizeError converts raw Go/API errors into user-friendly messages.
+func humanizeError(err error) string {
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "connection refused"):
+		return "Cannot connect to the API server. Check your OPENAI_BASE_URL."
+	case strings.Contains(msg, "no such host"):
+		return "DNS resolution failed. Check your network connection and OPENAI_BASE_URL."
+	case strings.Contains(msg, "context deadline exceeded"),
+		strings.Contains(msg, "Client.Timeout"):
+		return "Request timed out. The API server may be overloaded."
+	case strings.Contains(msg, "API error 401"):
+		return "Authentication failed. Check your OPENAI_API_KEY."
+	case strings.Contains(msg, "API error 403"):
+		return "Access denied. Your API key may not have permission for this model."
+	case strings.Contains(msg, "API error 404"):
+		return "Model not found. Check your model name."
+	case strings.Contains(msg, "API error 429"):
+		return "Rate limited. Too many requests — please wait a moment."
+	default:
+		// Cap length for display
+		if len(msg) > 200 {
+			return msg[:200] + "..."
+		}
+		return msg
+	}
+}
+

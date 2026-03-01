@@ -9,7 +9,6 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 )
 
 // ──────────────────────────────────────────────────────────────
@@ -866,5 +865,3 @@ func iabs(x int) int {
 	}
 	return x
 }
-
-var _ = lipgloss.NewStyle
