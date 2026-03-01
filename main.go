@@ -18,6 +18,12 @@ type Config struct {
 	BaseURL string
 	Model   string
 	WorkDir string
+
+	// Glue sidecar (optional — falls back to main OPENAI_* vars)
+	GlueAPIKey     string
+	GlueBaseURL    string
+	GlueFastModel  string
+	GlueSmartModel string
 }
 
 func loadConfig() (*Config, error) {
@@ -73,6 +79,12 @@ func loadConfig() (*Config, error) {
 	if err != nil || !info.IsDir() {
 		return nil, fmt.Errorf("working directory does not exist: %s", cfg.WorkDir)
 	}
+
+	// Glue sidecar config (all optional)
+	cfg.GlueAPIKey = os.Getenv("GLUE_API_KEY")
+	cfg.GlueBaseURL = os.Getenv("GLUE_BASE_URL")
+	cfg.GlueFastModel = os.Getenv("GLUE_FAST_MODEL")
+	cfg.GlueSmartModel = os.Getenv("GLUE_SMART_MODEL")
 
 	return cfg, nil
 }
