@@ -50,6 +50,12 @@ var styleFrameDone = lipgloss.NewStyle().
 	BorderForeground(colSuccess).
 	Padding(0, 1)
 
+// Main outer frame (planning mode)
+var styleFramePlan = lipgloss.NewStyle().
+	Border(lipgloss.RoundedBorder()).
+	BorderForeground(colPurple).
+	Padding(0, 1)
+
 // Tool block — pending (spinner visible)
 var styleToolPending = lipgloss.NewStyle().
 	Border(lipgloss.RoundedBorder()).

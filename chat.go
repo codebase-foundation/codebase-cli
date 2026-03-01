@@ -19,9 +19,11 @@ import (
 type chatState int
 
 const (
-	chatIdle      chatState = iota // waiting for user input
-	chatStreaming                  // agent is working
-	chatDoneFlash                 // brief green flash after completion
+	chatIdle       chatState = iota // waiting for user input
+	chatPlanning                    // Q&A planning phase
+	chatPlanReview                  // reviewing generated plan
+	chatStreaming                   // agent is working
+	chatDoneFlash                   // brief green flash after completion
 )
 
 // segment represents a chunk of conversation content.
@@ -65,6 +67,9 @@ type chatModel struct {
 	suggestions   []string // follow-up suggestions
 	recentActions []string // recent tool actions for narration
 	lastNarration time.Time
+
+	// Planning
+	planState *PlanState
 }
 
 // Messages
@@ -73,9 +78,17 @@ type flashTickMsg struct{}
 type narrateTickMsg struct{}
 type notifyTickMsg struct{}
 type glueResultMsg struct {
-	kind string // "chat", "clarify", "title", "celebrate", "suggest"
-	text string
+	kind        string // "chat", "clarify", "title", "celebrate", "suggest", "narrate"
+	text        string
 	suggestions []string
+}
+type planQuestionMsg struct {
+	question *PlanQuestion
+	done     bool
+	summary  string
+}
+type planGeneratedMsg struct {
+	plan string
 }
 
 func newChatModel(cfg *Config) chatModel {
@@ -157,69 +170,159 @@ func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 				m.rebuildViewport()
 				return m, nil
 			}
+			if m.state == chatPlanning || m.state == chatPlanReview {
+				m.state = chatIdle
+				m.planState = nil
+				m.input.Placeholder = "describe what you want to build..."
+				m.segments = append(m.segments, segment{
+					kind: "text",
+					text: "\n" + styleWarn.Render("  ■ planning cancelled") + "\n",
+				})
+				m.rebuildViewport()
+				return m, nil
+			}
 			return m, tea.Quit
 
 		case "enter":
-			if m.state != chatIdle {
-				return m, nil
-			}
 			prompt := strings.TrimSpace(m.input.Value())
 			if prompt == "" {
 				return m, nil
 			}
 			m.input.SetValue("")
-			m.suggestions = nil // clear old suggestions
 
-			// Route through glue intent classification
-			hasHistory := m.agent != nil
-			intent := m.glue.ClassifyIntent(prompt, hasHistory)
+			switch m.state {
+			case chatPlanning:
+				// User answering a planning question
+				cmds = append(cmds, m.handlePlanAnswer(prompt))
 
-			switch intent {
-			case IntentChat:
-				// Show user message
-				m.segments = append(m.segments, segment{
-					kind: "user",
-					text: "\n" + styleUserLabel.Render("  ❯ ") + prompt + "\n\n",
-				})
-				// Get reply in background
-				glue := m.glue
-				cmds = append(cmds, func() tea.Msg {
-					reply := glue.ChatReply(prompt, nil)
-					return glueResultMsg{kind: "chat", text: reply}
-				})
+			case chatPlanReview:
+				// User reviewing the plan: "go"/"yes" to approve, anything else is revision
+				cmds = append(cmds, m.handlePlanReview(prompt))
 
-			case IntentClarify:
-				m.segments = append(m.segments, segment{
-					kind: "user",
-					text: "\n" + styleUserLabel.Render("  ❯ ") + prompt + "\n\n",
-				})
-				glue := m.glue
-				cmds = append(cmds, func() tea.Msg {
-					reply := glue.ClarifyReply(prompt)
-					return glueResultMsg{kind: "clarify", text: reply}
-				})
+			case chatIdle:
+				m.suggestions = nil
 
-			default: // IntentAgent
-				m.startAgent(prompt)
-				cmds = append(cmds, m.waitForEvent())
-				// Start narration ticker
-				cmds = append(cmds, tea.Tick(10*time.Second, func(t time.Time) tea.Msg {
-					return narrateTickMsg{}
-				}))
-				// Generate title in background (first prompt only)
-				if m.title == "" {
+				// Route through glue intent classification
+				hasHistory := m.agent != nil
+				intent := m.glue.ClassifyIntent(prompt, hasHistory)
+
+				switch intent {
+				case IntentChat:
+					m.segments = append(m.segments, segment{
+						kind: "user",
+						text: "\n" + styleUserLabel.Render("  ❯ ") + prompt + "\n\n",
+					})
 					glue := m.glue
 					cmds = append(cmds, func() tea.Msg {
-						title := glue.GenerateTitle(prompt)
-						return glueResultMsg{kind: "title", text: title}
+						reply := glue.ChatReply(prompt, nil)
+						return glueResultMsg{kind: "chat", text: reply}
+					})
+
+				case IntentClarify:
+					m.segments = append(m.segments, segment{
+						kind: "user",
+						text: "\n" + styleUserLabel.Render("  ❯ ") + prompt + "\n\n",
+					})
+					glue := m.glue
+					cmds = append(cmds, func() tea.Msg {
+						reply := glue.ClarifyReply(prompt)
+						return glueResultMsg{kind: "clarify", text: reply}
+					})
+
+				case IntentPlan:
+					m.startPlanning(prompt)
+					glue := m.glue
+					ps := m.planState
+					cmds = append(cmds, func() tea.Msg {
+						q, done, summary := glue.GenerateQuestion(ps.OriginalPrompt, ps.QAHistory, ps.QuestionCount+1)
+						return planQuestionMsg{question: q, done: done, summary: summary}
+					})
+					// Generate title in background
+					if m.title == "" {
+						glue := m.glue
+						cmds = append(cmds, func() tea.Msg {
+							title := glue.GenerateTitle(prompt)
+							return glueResultMsg{kind: "title", text: title}
+						})
+					}
+
+				default: // IntentAgent
+					m.startAgent(prompt)
+					cmds = append(cmds, m.waitForEvent())
+					cmds = append(cmds, tea.Tick(10*time.Second, func(t time.Time) tea.Msg {
+						return narrateTickMsg{}
+					}))
+					if m.title == "" {
+						glue := m.glue
+						cmds = append(cmds, func() tea.Msg {
+							title := glue.GenerateTitle(prompt)
+							return glueResultMsg{kind: "title", text: title}
+						})
+					}
+					m.notify.Push(Notification{
+						Type: NotifyInfo,
+						Text: "Starting agent...",
 					})
 				}
-				m.notify.Push(Notification{
-					Type: NotifyInfo,
-					Text: "Starting agent...",
-				})
+
+			default:
+				// Streaming or flash — ignore enter
 			}
 		}
+
+	case planQuestionMsg:
+		if msg.done {
+			// Q&A complete — generate the plan
+			m.planState.Done = true
+			m.notify.Push(Notification{Type: NotifyProgress, Text: "Generating plan..."})
+			m.segments = append(m.segments, segment{
+				kind: "text",
+				text: styleMuted.Render("  Planning complete. Generating implementation plan...\n\n"),
+			})
+			m.rebuildViewport()
+			glue := m.glue
+			ps := m.planState
+			cmds = append(cmds, func() tea.Msg {
+				plan := glue.GeneratePlan(ps.OriginalPrompt, ps.QAHistory)
+				return planGeneratedMsg{plan: plan}
+			})
+		} else if msg.question != nil {
+			// Show the question
+			m.planState.CurrentQ = msg.question
+			m.planState.QuestionCount++
+			qText := FormatQuestion(msg.question, m.planState.QuestionCount)
+			m.segments = append(m.segments, segment{
+				kind: "text",
+				text: "\n" + lipgloss.NewStyle().Foreground(colPurple).Bold(true).Render("  ◆ Planning") + "\n" + qText,
+			})
+			m.rebuildViewport()
+			m.input.Placeholder = "type a number or your answer..."
+		}
+
+	case planGeneratedMsg:
+		m.planState.Plan = msg.plan
+		m.state = chatPlanReview
+		m.notify.ClearProgress()
+		m.notify.Push(Notification{Type: NotifySuccess, Text: "Plan ready for review"})
+
+		// Show the plan
+		m.segments = append(m.segments, segment{
+			kind: "text",
+			text: "\n" + lipgloss.NewStyle().Foreground(colPurple).Bold(true).Render("  ◆ Implementation Plan") + "\n\n",
+		})
+		// Indent plan lines
+		for _, line := range strings.Split(msg.plan, "\n") {
+			m.segments = append(m.segments, segment{
+				kind: "text",
+				text: "  " + line + "\n",
+			})
+		}
+		m.segments = append(m.segments, segment{
+			kind: "text",
+			text: "\n" + styleMuted.Render("  Type \"go\" to start building, or describe changes to revise the plan.") + "\n",
+		})
+		m.input.Placeholder = "go / or describe revisions..."
+		m.rebuildViewport()
 
 	case agentEventMsg:
 		cmds = append(cmds, m.handleAgentEvent(AgentEvent(msg)))
@@ -316,7 +419,7 @@ func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 		}
 	}
 
-	if m.state == chatIdle {
+	if m.state == chatIdle || m.state == chatPlanning || m.state == chatPlanReview {
 		var cmd tea.Cmd
 		m.input, cmd = m.input.Update(msg)
 		cmds = append(cmds, cmd)
@@ -429,6 +532,120 @@ func (m *chatModel) startAgent(prompt string) {
 		m.agent.Run(prompt)
 		close(m.eventCh)
 	}()
+}
+
+// startPlanning enters the Q&A planning phase.
+func (m *chatModel) startPlanning(prompt string) {
+	m.state = chatPlanning
+	m.planState = &PlanState{
+		OriginalPrompt: prompt,
+	}
+	m.input.Placeholder = "type a number or your answer..."
+
+	m.segments = append(m.segments, segment{
+		kind: "user",
+		text: "\n" + styleUserLabel.Render("  ❯ ") + prompt + "\n\n",
+	})
+	m.notify.Push(Notification{
+		Type: NotifyInfo,
+		Text: "Entering planning mode...",
+	})
+	m.rebuildViewport()
+}
+
+// handlePlanAnswer processes the user's answer to a planning question.
+func (m *chatModel) handlePlanAnswer(input string) tea.Cmd {
+	if m.planState == nil || m.planState.CurrentQ == nil {
+		return nil
+	}
+
+	answer := ParseAnswer(input, m.planState.CurrentQ)
+	if answer == "" {
+		return nil
+	}
+
+	// Show the answer
+	m.segments = append(m.segments, segment{
+		kind: "user",
+		text: "  " + styleUserLabel.Render("  → ") + answer + "\n",
+	})
+
+	// Record in Q&A history
+	m.planState.QAHistory = append(m.planState.QAHistory, QAPair{
+		Question: m.planState.CurrentQ.Question,
+		Answer:   answer,
+	})
+	m.planState.CurrentQ = nil
+	m.rebuildViewport()
+
+	// Ask next question
+	glue := m.glue
+	ps := m.planState
+	return func() tea.Msg {
+		q, done, summary := glue.GenerateQuestion(ps.OriginalPrompt, ps.QAHistory, ps.QuestionCount+1)
+		return planQuestionMsg{question: q, done: done, summary: summary}
+	}
+}
+
+// handlePlanReview processes user input during plan review.
+func (m *chatModel) handlePlanReview(input string) tea.Cmd {
+	if m.planState == nil {
+		return nil
+	}
+
+	lower := strings.ToLower(strings.TrimSpace(input))
+
+	// Approve: start the agent with the plan
+	if lower == "go" || lower == "yes" || lower == "y" || lower == "ok" || lower == "approve" || lower == "start" {
+		m.segments = append(m.segments, segment{
+			kind: "text",
+			text: styleMuted.Render("  Plan approved. Starting build...\n\n"),
+		})
+		m.input.Placeholder = "describe what you want to build..."
+
+		// Build enriched prompt from the plan
+		enrichedPrompt := BuildPlanPrompt(m.planState.OriginalPrompt, m.planState.Plan, m.planState.QAHistory)
+		m.planState = nil
+
+		// Start agent with the enriched prompt
+		m.startAgent(enrichedPrompt)
+		return tea.Batch(
+			m.waitForEvent(),
+			tea.Tick(10*time.Second, func(t time.Time) tea.Msg { return narrateTickMsg{} }),
+		)
+	}
+
+	// Skip planning: just run the original prompt directly
+	if lower == "skip" {
+		m.segments = append(m.segments, segment{
+			kind: "text",
+			text: styleMuted.Render("  Skipping plan. Starting agent directly...\n\n"),
+		})
+		m.input.Placeholder = "describe what you want to build..."
+
+		original := m.planState.OriginalPrompt
+		m.planState = nil
+		m.startAgent(original)
+		return tea.Batch(
+			m.waitForEvent(),
+			tea.Tick(10*time.Second, func(t time.Time) tea.Msg { return narrateTickMsg{} }),
+		)
+	}
+
+	// Anything else is revision feedback
+	m.segments = append(m.segments, segment{
+		kind: "user",
+		text: "\n" + styleUserLabel.Render("  ❯ ") + input + "\n\n",
+	})
+	m.notify.Push(Notification{Type: NotifyProgress, Text: "Revising plan..."})
+	m.rebuildViewport()
+
+	glue := m.glue
+	currentPlan := m.planState.Plan
+	return func() tea.Msg {
+		revised := glue.RevisePlan(currentPlan, input)
+		return planGeneratedMsg{plan: revised}
+	}
 }
 
 func (m *chatModel) handleAgentEvent(evt AgentEvent) tea.Cmd {
@@ -587,8 +804,13 @@ func (m chatModel) View() string {
 	fileStr := styleMuted.Render(fmt.Sprintf("%d files", m.files))
 
 	statusParts := []string{modelStr, tokenStr, fileStr}
-	if m.state == chatStreaming {
+	switch m.state {
+	case chatStreaming:
 		statusParts = append(statusParts, m.spinner.View()+styleMuted.Render(" working"))
+	case chatPlanning:
+		statusParts = append(statusParts, lipgloss.NewStyle().Foreground(colPurple).Render("◆ planning"))
+	case chatPlanReview:
+		statusParts = append(statusParts, lipgloss.NewStyle().Foreground(colPurple).Render("◆ review"))
 	}
 	statusRight := strings.Join(statusParts, styleDim.Render(" │ "))
 
@@ -616,6 +838,8 @@ func (m chatModel) View() string {
 		frame = styleFrameActive.Width(m.width - 2)
 	case chatDoneFlash:
 		frame = styleFrameDone.Width(m.width - 2)
+	case chatPlanning, chatPlanReview:
+		frame = styleFramePlan.Width(m.width - 2)
 	default:
 		frame = styleFrame.Width(m.width - 2)
 	}
@@ -637,8 +861,11 @@ func (m chatModel) View() string {
 	// ── Input ────────────────────────────────────────────────
 	inputLine := " " + m.input.View()
 	hintAction := "quit"
-	if m.state == chatStreaming {
+	switch m.state {
+	case chatStreaming:
 		hintAction = "stop"
+	case chatPlanning, chatPlanReview:
+		hintAction = "cancel plan"
 	}
 	hint := styleDim.Render("ctrl+c " + hintAction)
 	inputGap := m.width - lipgloss.Width(inputLine) - lipgloss.Width(hint) - 2

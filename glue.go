@@ -63,31 +63,30 @@ func envOr(key, fallback string) string {
 type Intent string
 
 const (
-	IntentAgent   Intent = "agent"   // needs tools — full agent loop
+	IntentAgent   Intent = "agent"   // simple task — straight to agent loop
+	IntentPlan    Intent = "plan"    // complex task — needs Q&A planning first
 	IntentChat    Intent = "chat"    // simple question/conversation — answer directly
 	IntentClarify Intent = "clarify" // ambiguous — ask for clarification
 )
 
 const classifyPrompt = `Classify this user message into exactly ONE category:
 
-- "agent": User wants to CREATE, MODIFY, FIX, BUILD, REFACTOR, DELETE, or RUN something. Any request that needs file changes or shell commands. When in doubt, choose agent.
+- "plan": User wants to BUILD something complex, multi-step, or architectural. Needs clarifying questions before starting. Examples: new features, new projects, major refactors, system design.
+- "agent": User wants a SIMPLE, CLEAR change: fix a specific bug, run a command, edit a known file, add something small and well-defined. Can start immediately without planning.
 - "chat": User is asking a QUESTION, making conversation, greeting, giving feedback, or asking about capabilities. No file changes needed.
 - "clarify": User's request is too vague to act on. They said something like "fix it" or "make it better" without enough context.
 
-Examples:
-- "add a login page" → agent
-- "fix the bug in auth.go" → agent
-- "refactor the database layer" → agent
-- "run the tests" → agent
-- "what does this function do?" → chat
-- "how does the routing work?" → chat
-- "hi" → chat
-- "thanks, looks good" → chat
-- "make it better" → clarify
-- "fix it" → clarify
-- "update the thing" → clarify
+Key distinction — plan vs agent:
+- "build an auth system" → plan (complex, many decisions to make)
+- "add dark mode to the app" → plan (design decisions, multiple files)
+- "create a REST API for users" → plan (endpoints, schema, middleware)
+- "fix the typo in main.go" → agent (simple, clear)
+- "run the tests" → agent (no planning needed)
+- "add a .gitignore file" → agent (straightforward)
+- "rename the function to camelCase" → agent (simple edit)
+- "refactor the auth module to use JWT" → plan (architectural change)
 
-Respond with ONLY the category word: agent, chat, or clarify`
+Respond with ONLY the category word: plan, agent, chat, or clarify`
 
 // ClassifyIntent determines what kind of response a user message needs.
 func (g *GlueClient) ClassifyIntent(userMsg string, hasHistory bool) Intent {
@@ -102,11 +101,10 @@ func (g *GlueClient) ClassifyIntent(userMsg string, hasHistory bool) Intent {
 	}
 
 	result = strings.TrimSpace(strings.ToLower(result))
-	// Extract just the keyword
-	for _, intent := range []Intent{IntentChat, IntentClarify, IntentAgent} {
+	// Extract just the keyword — check plan before agent since "agent" is a substring match risk
+	for _, intent := range []Intent{IntentPlan, IntentChat, IntentClarify, IntentAgent} {
 		if strings.Contains(result, string(intent)) {
 			// If they have conversation history, "clarify" becomes less useful
-			// since the agent has context — upgrade to agent
 			if intent == IntentClarify && hasHistory {
 				return IntentAgent
 			}
