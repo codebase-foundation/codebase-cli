@@ -259,6 +259,16 @@ func (m *chatModel) startAgent(prompt string) {
 	if m.agent == nil {
 		client := NewLLMClient(m.config.APIKey, m.config.BaseURL, m.config.Model)
 		m.agent = NewAgent(client, m.config.WorkDir, m.eventCh, m.stopCh)
+
+		// Try to restore a previous session
+		if session := LoadSession(m.config.WorkDir, m.config.Model); session != nil {
+			m.agent.history = session.History
+			m.tokens = session.Tokens
+			m.segments = append(m.segments, segment{
+				kind: "text",
+				text: styleMuted.Render("  Session restored from previous conversation.\n\n"),
+			})
+		}
 	} else {
 		m.agent.events = m.eventCh
 		m.agent.stopCh = m.stopCh
@@ -328,6 +338,8 @@ func (m *chatModel) handleAgentEvent(evt AgentEvent) tea.Cmd {
 		m.files = 0
 		if m.agent != nil {
 			m.files = m.agent.FilesChanged()
+			// Persist session to disk
+			SaveSession(m.agent, m.tokens)
 		}
 		m.state = chatDoneFlash
 		m.flashFrames = 3

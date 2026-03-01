@@ -88,6 +88,9 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Clean up stale sessions in the background
+	go CleanStaleSessions()
+
 	p := tea.NewProgram(
 		newAppModel(cfg),
 		tea.WithAltScreen(),
