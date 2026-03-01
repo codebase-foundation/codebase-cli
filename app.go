@@ -53,6 +53,7 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case screenBoot:
 		switch msg.(type) {
 		case bootDoneMsg:
+			m.boot.audio.Stop() // stop boot music (nil-safe)
 			m.screen = screenChat
 			return m, tea.Batch(
 				m.chat.Init(),

@@ -20,12 +20,13 @@ const subagentSystemPrompt = `You are a focused research assistant. You help gat
 
 You have read-only access to the project. You CANNOT modify any files.
 
-Available tools: read_file, list_files, search_files, shell
+Available tools: read_file, list_files, search_files, web_search, shell
 
 Guidelines:
 - Be thorough but efficient — gather what's needed, then summarize
 - Use search_files to find relevant code quickly
 - Use list_files to explore project structure
+- Use web_search when you need external documentation, API references, or current information
 - Use shell for read-only commands only (ls, cat, grep, git log, etc.)
 - When done, provide a clear, concise summary of your findings`
 
@@ -35,7 +36,7 @@ var subagentToolDefs []ToolDef
 func init() {
 	for _, td := range toolDefs {
 		switch td.Function.Name {
-		case "read_file", "list_files", "search_files", "shell":
+		case "read_file", "list_files", "search_files", "web_search", "shell":
 			subagentToolDefs = append(subagentToolDefs, td)
 		}
 	}
@@ -102,7 +103,7 @@ func RunSubagent(client *LLMClient, workDir, task string) (string, error) {
 		for _, tc := range toolCalls {
 			// Safety: only allow read-only tools
 			switch tc.Function.Name {
-			case "read_file", "list_files", "search_files", "shell":
+			case "read_file", "list_files", "search_files", "web_search", "shell":
 				// shell is allowed but subagent should only use read-only commands
 			default:
 				history = append(history, ChatMessage{

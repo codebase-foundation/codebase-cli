@@ -216,6 +216,30 @@ var toolDefs = []ToolDef{
 	{
 		Type: "function",
 		Function: ToolDefFunction{
+			Name: "web_search",
+			Description: "Search the web for current information. " +
+				"Use when you need up-to-date information, documentation, API references, error solutions, " +
+				"or anything not available in the local project files. " +
+				"Returns titles, URLs, and text snippets from search results.",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"query": map[string]interface{}{
+						"type":        "string",
+						"description": "The search query.",
+					},
+					"max_results": map[string]interface{}{
+						"type":        "number",
+						"description": "Maximum number of results to return (1-10, default 5).",
+					},
+				},
+				"required": []string{"query"},
+			},
+		},
+	},
+	{
+		Type: "function",
+		Function: ToolDefFunction{
 			Name: "shell",
 			Description: "Execute a shell command in the project directory. " +
 				"Use for: running builds, tests, installing packages, git commands, and any terminal task. " +
@@ -240,6 +264,7 @@ var parallelSafeTools = map[string]bool{
 	"read_file":      true,
 	"list_files":     true,
 	"search_files":   true,
+	"web_search":     true,
 	"dispatch_agent": true,
 }
 
@@ -295,6 +320,8 @@ func ExecuteTool(name string, argsJSON string, workDir string) (string, bool) {
 		return toolListFiles(args, workDir)
 	case "search_files":
 		return toolSearchFiles(args, workDir)
+	case "web_search":
+		return toolWebSearch(args)
 	case "dispatch_agent":
 		// dispatch_agent is handled directly in the agent loop (needs LLM client)
 		return "Error: dispatch_agent must be called through the agent loop", false
@@ -909,6 +936,26 @@ func searchWithGrep(pattern, searchPath, include, workDir string) (string, error
 	output = strings.ReplaceAll(output, absRoot+string(filepath.Separator), "")
 
 	return strings.TrimRight(output, "\n"), nil
+}
+
+// ── web_search ───────────────────────────────────────────────
+
+func toolWebSearch(args map[string]interface{}) (string, bool) {
+	query := getString(args, "query")
+	if query == "" {
+		return "Error: query is required", false
+	}
+	maxResults := 5
+	if mr, ok := getFloat(args, "max_results"); ok && mr > 0 {
+		maxResults = int(mr)
+	}
+
+	resp, err := WebSearch(query, maxResults)
+	if err != nil {
+		return fmt.Sprintf("Search error: %v", err), false
+	}
+
+	return FormatSearchResults(resp), true
 }
 
 // ── shell ────────────────────────────────────────────────────

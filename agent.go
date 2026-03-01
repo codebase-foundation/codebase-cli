@@ -60,10 +60,12 @@ Available tools:
 - multi_edit: Batch multiple edits across files. Per-file atomicity with rollback.
 - list_files: List directory contents or glob for files (e.g. "**/*.go").
 - search_files: Regex search across files (powered by ripgrep). Find definitions, usages, etc.
+- web_search: Search the web. Use for current info, docs, versions, error solutions, or anything not in local files.
 - dispatch_agent: Spawn a read-only research subagent to investigate questions in isolated context.
 - shell: Run any shell command. Use for builds, tests, git, package management.
 
 Guidelines:
+- You can call multiple tools in parallel — read_file, list_files, search_files, web_search, and dispatch_agent all run concurrently
 - Use list_files and search_files to explore the project before making changes
 - Read files before editing them — understand existing code first
 - Make targeted, minimal changes — don't rewrite entire files unnecessarily

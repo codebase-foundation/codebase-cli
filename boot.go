@@ -21,6 +21,7 @@ import (
 type demoTickMsg time.Time
 type bootTickMsg struct{}
 type bootDoneMsg struct{}
+type bootAudioMsg struct{ player *AudioPlayer }
 
 type bootStep struct {
 	label string
@@ -150,6 +151,8 @@ type bootModel struct {
 	sin2 [512]float64
 	sin3 [512]float64
 	sin4 [512]float64
+
+	audio *AudioPlayer
 }
 
 func newBootModel(cfg *Config) bootModel {
@@ -201,6 +204,10 @@ func buildBootSteps(cfg *Config) []bootStep {
 
 func (m bootModel) Init() tea.Cmd {
 	return tea.Batch(
+		func() tea.Msg {
+			// Start boot music in background (nil if no audio device)
+			return bootAudioMsg{player: StartBootMusic()}
+		},
 		tea.Tick(50*time.Millisecond, func(t time.Time) tea.Msg { return demoTickMsg(t) }),
 		// First boot step after 4 seconds (drawn-out demo intro)
 		tea.Tick(4*time.Second, func(t time.Time) tea.Msg { return bootTickMsg{} }),
@@ -209,6 +216,9 @@ func (m bootModel) Init() tea.Cmd {
 
 func (m bootModel) Update(msg tea.Msg) (bootModel, tea.Cmd) {
 	switch msg := msg.(type) {
+	case bootAudioMsg:
+		m.audio = msg.player
+
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
@@ -224,7 +234,9 @@ func (m bootModel) Update(msg tea.Msg) (bootModel, tea.Cmd) {
 		}
 		if m.current >= len(m.steps) {
 			m.done = true
-			return m, tea.Tick(1200*time.Millisecond, func(t time.Time) tea.Msg { return bootDoneMsg{} })
+			return m, tea.Tick(1200*time.Millisecond, func(t time.Time) tea.Msg {
+				return bootDoneMsg{}
+			})
 		}
 		return m, tea.Tick(500*time.Millisecond, func(t time.Time) tea.Msg { return bootTickMsg{} })
 

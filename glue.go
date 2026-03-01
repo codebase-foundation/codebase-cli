@@ -69,28 +69,14 @@ const (
 	IntentClarify Intent = "clarify" // ambiguous — ask for clarification
 )
 
-const classifyPrompt = `Classify this user message into exactly ONE category:
+const classifyPrompt = `Classify this user message. Default to "agent" — it can handle almost anything.
 
-- "agent": User wants to build, modify, fix, or run something. This is the DEFAULT for any coding task. The agent is smart and can figure out complex tasks on its own. When in doubt, choose agent.
-- "plan": ONLY use this when the request is genuinely ambiguous and you CANNOT start without asking the user to choose between fundamentally different approaches. The agent can handle complex multi-file tasks — plan is for when there are real design decisions only the user can make.
-- "chat": User is asking a question, making conversation, greeting, or giving feedback. No code changes needed.
-- "clarify": User's request is too vague to act on at all (e.g. "fix it" with no context).
+- "agent": Any task, question, or request. The agent has file access, shell, and web search. This is the default.
+- "plan": The request has genuinely different approaches that only the user can decide between.
+- "chat": Greetings, thanks, or casual conversation. Nothing actionable.
+- "clarify": Too vague to act on (e.g. "fix it" with zero context).
 
-IMPORTANT: Default to "agent". Most requests — even complex ones — should go straight to the agent. Only use "plan" when you genuinely need the user to decide between different approaches before any work can begin.
-
-Examples:
-- "build an auth system" → agent (just build it with sensible defaults)
-- "add dark mode" → agent (standard implementation)
-- "create a REST API for users" → agent (the agent knows how)
-- "refactor the database layer" → agent (the agent can read the code and decide)
-- "build me a full e-commerce site from scratch" → plan (too many unknowns: what products? payment provider? design style?)
-- "fix the typo in main.go" → agent
-- "run the tests" → agent
-- "hi" → chat
-- "how does the routing work?" → chat
-- "make it better" → clarify
-
-Respond with ONLY the category word: agent, plan, chat, or clarify`
+When in doubt, pick "agent". Respond with ONLY one word: agent, plan, chat, or clarify`
 
 // ClassifyIntent determines what kind of response a user message needs.
 func (g *GlueClient) ClassifyIntent(userMsg string, hasHistory bool) Intent {
