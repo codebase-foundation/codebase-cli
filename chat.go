@@ -365,7 +365,14 @@ func (m *chatModel) rebuildViewport() {
 			if seg.tool.state == "pending" {
 				block = strings.Replace(block, "⣾", m.spinner.View(), 1)
 			}
-			sb.WriteString("  " + block + "\n\n")
+			// Indent every line of the block (not just the first)
+			for i, line := range strings.Split(block, "\n") {
+				if i > 0 {
+					sb.WriteString("\n")
+				}
+				sb.WriteString("  " + line)
+			}
+			sb.WriteString("\n\n")
 		default:
 			sb.WriteString(seg.text)
 		}
