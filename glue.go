@@ -71,22 +71,26 @@ const (
 
 const classifyPrompt = `Classify this user message into exactly ONE category:
 
-- "plan": User wants to BUILD something complex, multi-step, or architectural. Needs clarifying questions before starting. Examples: new features, new projects, major refactors, system design.
-- "agent": User wants a SIMPLE, CLEAR change: fix a specific bug, run a command, edit a known file, add something small and well-defined. Can start immediately without planning.
-- "chat": User is asking a QUESTION, making conversation, greeting, giving feedback, or asking about capabilities. No file changes needed.
-- "clarify": User's request is too vague to act on. They said something like "fix it" or "make it better" without enough context.
+- "agent": User wants to build, modify, fix, or run something. This is the DEFAULT for any coding task. The agent is smart and can figure out complex tasks on its own. When in doubt, choose agent.
+- "plan": ONLY use this when the request is genuinely ambiguous and you CANNOT start without asking the user to choose between fundamentally different approaches. The agent can handle complex multi-file tasks — plan is for when there are real design decisions only the user can make.
+- "chat": User is asking a question, making conversation, greeting, or giving feedback. No code changes needed.
+- "clarify": User's request is too vague to act on at all (e.g. "fix it" with no context).
 
-Key distinction — plan vs agent:
-- "build an auth system" → plan (complex, many decisions to make)
-- "add dark mode to the app" → plan (design decisions, multiple files)
-- "create a REST API for users" → plan (endpoints, schema, middleware)
-- "fix the typo in main.go" → agent (simple, clear)
-- "run the tests" → agent (no planning needed)
-- "add a .gitignore file" → agent (straightforward)
-- "rename the function to camelCase" → agent (simple edit)
-- "refactor the auth module to use JWT" → plan (architectural change)
+IMPORTANT: Default to "agent". Most requests — even complex ones — should go straight to the agent. Only use "plan" when you genuinely need the user to decide between different approaches before any work can begin.
 
-Respond with ONLY the category word: plan, agent, chat, or clarify`
+Examples:
+- "build an auth system" → agent (just build it with sensible defaults)
+- "add dark mode" → agent (standard implementation)
+- "create a REST API for users" → agent (the agent knows how)
+- "refactor the database layer" → agent (the agent can read the code and decide)
+- "build me a full e-commerce site from scratch" → plan (too many unknowns: what products? payment provider? design style?)
+- "fix the typo in main.go" → agent
+- "run the tests" → agent
+- "hi" → chat
+- "how does the routing work?" → chat
+- "make it better" → clarify
+
+Respond with ONLY the category word: agent, plan, chat, or clarify`
 
 // ClassifyIntent determines what kind of response a user message needs.
 func (g *GlueClient) ClassifyIntent(userMsg string, hasHistory bool) Intent {
