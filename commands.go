@@ -115,6 +115,16 @@ func init() {
 			var sb strings.Builder
 			sb.WriteString(styleMuted.Render("  Session info:") + "\n")
 			sb.WriteString(styleDim.Render("  Model:    ") + styleMuted.Render(m.config.Model) + "\n")
+			// Protocol (API format)
+			proto := ProtocolOpenAI
+			if m.agent != nil {
+				proto = m.agent.client.Protocol
+			}
+			protoLabel := "Chat Completions (OpenAI)"
+			if proto == ProtocolAnthropic {
+				protoLabel = "Messages API (Anthropic)"
+			}
+			sb.WriteString(styleDim.Render("  Protocol: ") + styleMuted.Render(protoLabel) + "\n")
 			// Token counts with cost estimate
 			tokenLine := fmt.Sprintf("%d (%d in + %d out)", totalTokens, m.tokens.PromptTokens, m.tokens.CompletionTokens)
 			cost := estimateCost(m.config.Model, m.tokens.PromptTokens, m.tokens.CompletionTokens)
@@ -451,6 +461,9 @@ func estimateCost(model string, promptTokens, completionTokens int) string {
 		"claude-sonnet": {3.00, 15.0},
 		"claude-opus":   {15.0, 75.0},
 		"claude-haiku":  {0.25, 1.25},
+		"minimax-m2.5":  {1.00, 5.00},
+		"minimax-m2.1":  {0.50, 2.50},
+		"minimax-m2":    {0.50, 2.50},
 		"glm-4":         {0.14, 0.14},
 		"glm-4.7":       {0.14, 0.14},
 	}

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 )
@@ -108,11 +109,18 @@ type StreamEvent struct {
 //  LLM Client
 // ──────────────────────────────────────────────────────────────
 
+// Protocol constants for API format detection
+const (
+	ProtocolOpenAI    = "openai"
+	ProtocolAnthropic = "anthropic"
+)
+
 type LLMClient struct {
-	APIKey  string
-	BaseURL string
-	Model   string
-	client  *http.Client
+	APIKey   string
+	BaseURL  string
+	Model    string
+	Protocol string // "openai" or "anthropic"
+	client   *http.Client
 }
 
 func NewLLMClient(apiKey, baseURL, model string) *LLMClient {
@@ -126,18 +134,50 @@ func newLLMClientWithTimeout(apiKey, baseURL, model string, timeout time.Duratio
 	if model == "" {
 		model = "gpt-4o"
 	}
+	baseURL = strings.TrimSuffix(baseURL, "/")
+	protocol := detectProtocol(baseURL)
+
 	return &LLMClient{
-		APIKey:  apiKey,
-		BaseURL: strings.TrimSuffix(baseURL, "/"),
-		Model:   model,
-		client:  &http.Client{Timeout: timeout},
+		APIKey:   apiKey,
+		BaseURL:  baseURL,
+		Model:    model,
+		Protocol: protocol,
+		client:   &http.Client{Timeout: timeout},
 	}
 }
 
-// StreamChat sends a streaming Chat Completions request and pushes
-// parsed events into the provided channel. Caller should read from ch
-// until it is closed.
+// detectProtocol determines the API protocol from the base URL and env vars.
+func detectProtocol(baseURL string) string {
+	// Explicit env var override
+	if p := os.Getenv("LLM_PROTOCOL"); p != "" {
+		switch strings.ToLower(p) {
+		case "anthropic", "claude", "messages":
+			return ProtocolAnthropic
+		default:
+			return ProtocolOpenAI
+		}
+	}
+	// Auto-detect from URL
+	urlLower := strings.ToLower(baseURL)
+	if strings.Contains(urlLower, "/anthropic") || strings.Contains(urlLower, "anthropic.com") {
+		return ProtocolAnthropic
+	}
+	return ProtocolOpenAI
+}
+
+// StreamChat sends a streaming LLM request and pushes parsed events
+// into the provided channel. Dispatches to the appropriate protocol
+// implementation based on c.Protocol.
 func (c *LLMClient) StreamChat(ctx context.Context, messages []ChatMessage, tools []ToolDef, ch chan<- StreamEvent) {
+	if c.Protocol == ProtocolAnthropic {
+		c.streamChatAnthropic(ctx, messages, tools, ch)
+		return
+	}
+	c.streamChatOpenAI(ctx, messages, tools, ch)
+}
+
+// streamChatOpenAI sends a streaming OpenAI Chat Completions request.
+func (c *LLMClient) streamChatOpenAI(ctx context.Context, messages []ChatMessage, tools []ToolDef, ch chan<- StreamEvent) {
 	defer close(ch)
 
 	body := map[string]interface{}{

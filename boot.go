@@ -191,9 +191,14 @@ func buildBootSteps(cfg *Config) []bootStep {
 	if home != "" && strings.HasPrefix(workDisplay, home) {
 		workDisplay = "~" + workDisplay[len(home):]
 	}
+	proto := detectProtocol(cfg.BaseURL)
+	protoLabel := "chat completions"
+	if proto == ProtocolAnthropic {
+		protoLabel = "messages api"
+	}
 	return []bootStep{
 		{label: "config", value: "loaded"},
-		{label: "provider", value: cfg.Model},
+		{label: "provider", value: fmt.Sprintf("%s (%s)", cfg.Model, protoLabel)},
 		{label: "workspace", value: fmt.Sprintf("%s (%d files)", workDisplay, fileCount)},
 		{label: "terminal", value: TerminalName()},
 		{label: "status", value: "ready"},

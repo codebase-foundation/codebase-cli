@@ -37,6 +37,7 @@ var defaultContextWindows = map[string]int{
 	"o3":             200000,
 	"o4-mini":        200000,
 	"claude":         200000,
+	"minimax":        204800,
 	"glm":            128000,
 	"gemini":         1000000,
 	"deepseek":       128000,
@@ -227,8 +228,16 @@ func compactHistory(client *LLMClient, messages []ChatMessage) ([]ChatMessage, b
 	return compacted, true
 }
 
-// nonStreamingChat makes a non-streaming Chat Completions call.
+// nonStreamingChat makes a non-streaming LLM call, dispatching by protocol.
 func nonStreamingChat(client *LLMClient, messages []ChatMessage) (string, error) {
+	if client.Protocol == ProtocolAnthropic {
+		return nonStreamingChatAnthropic(client, messages)
+	}
+	return nonStreamingChatOpenAI(client, messages)
+}
+
+// nonStreamingChatOpenAI makes a non-streaming OpenAI Chat Completions call.
+func nonStreamingChatOpenAI(client *LLMClient, messages []ChatMessage) (string, error) {
 	body := map[string]interface{}{
 		"model":    client.Model,
 		"messages": messages,
