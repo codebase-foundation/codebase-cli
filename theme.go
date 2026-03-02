@@ -288,3 +288,29 @@ func fgStyle(hex string) lipgloss.Style {
 	return lipgloss.NewStyle().Foreground(lipgloss.Color(hex))
 }
 
+// renderGradientText renders each rune with a color that sweeps through
+// three hex stops (start → mid → end) across the length of the string.
+func renderGradientText(text, hex1, hex2, hex3 string) string {
+	runes := []rune(text)
+	n := len(runes)
+	if n == 0 {
+		return ""
+	}
+	if n == 1 {
+		return fgStyle(hex1).Render(string(runes))
+	}
+
+	var sb strings.Builder
+	for i, r := range runes {
+		t := float64(i) / float64(n-1) // 0.0 → 1.0
+		var col string
+		if t <= 0.5 {
+			col = lerpColor(hex1, hex2, t*2)
+		} else {
+			col = lerpColor(hex2, hex3, (t-0.5)*2)
+		}
+		sb.WriteString(fgStyle(col).Render(string(r)))
+	}
+	return sb.String()
+}
+

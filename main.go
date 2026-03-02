@@ -1,14 +1,12 @@
 package main
 
 import (
-	"bufio"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strings"
 	"syscall"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -25,11 +23,12 @@ var (
 // ──────────────────────────────────────────────────────────────
 
 type Config struct {
-	APIKey  string
-	BaseURL string
-	Model   string
-	WorkDir string
-	Resume  bool // --resume flag: restore previous session
+	APIKey     string
+	BaseURL    string
+	Model      string
+	WorkDir    string
+	Resume     bool // --resume flag: restore previous session
+	NeedsSetup bool // true when no API key found — launch setup wizard
 }
 
 func loadConfig() (*Config, error) {
@@ -47,19 +46,12 @@ func loadConfig() (*Config, error) {
 	}
 
 	cfg := &Config{}
+	saved := loadSavedConfig()
 
-	// API key: env var → saved config → interactive prompt
+	// API key: env var → saved config → needs setup
 	cfg.APIKey = os.Getenv("OPENAI_API_KEY")
 	if cfg.APIKey == "" {
-		saved := loadSavedConfig()
 		cfg.APIKey = saved.APIKey
-	}
-	if cfg.APIKey == "" {
-		key, err := promptForAPIKey()
-		if err != nil {
-			return nil, err
-		}
-		cfg.APIKey = key
 	}
 
 	// Base URL
@@ -68,7 +60,6 @@ func loadConfig() (*Config, error) {
 		cfg.BaseURL = *baseURL
 	}
 	if cfg.BaseURL == "" {
-		saved := loadSavedConfig()
 		if saved.BaseURL != "" {
 			cfg.BaseURL = saved.BaseURL
 		} else {
@@ -82,12 +73,25 @@ func loadConfig() (*Config, error) {
 		cfg.Model = *model
 	}
 	if cfg.Model == "" {
-		saved := loadSavedConfig()
 		if saved.Model != "" {
 			cfg.Model = saved.Model
 		} else {
 			cfg.Model = "gpt-4o"
 		}
+	}
+
+	// Set glue env vars from saved config so NewGlueClient picks them up
+	if saved.GlueAPIKey != "" && os.Getenv("GLUE_API_KEY") == "" {
+		os.Setenv("GLUE_API_KEY", saved.GlueAPIKey)
+	}
+	if saved.GlueBaseURL != "" && os.Getenv("GLUE_BASE_URL") == "" {
+		os.Setenv("GLUE_BASE_URL", saved.GlueBaseURL)
+	}
+	if saved.GlueFastModel != "" && os.Getenv("GLUE_FAST_MODEL") == "" {
+		os.Setenv("GLUE_FAST_MODEL", saved.GlueFastModel)
+	}
+	if saved.GlueSmartModel != "" && os.Getenv("GLUE_SMART_MODEL") == "" {
+		os.Setenv("GLUE_SMART_MODEL", saved.GlueSmartModel)
 	}
 
 	// Working directory
@@ -114,6 +118,11 @@ func loadConfig() (*Config, error) {
 	// Resume flag
 	cfg.Resume = *resume
 
+	// If no API key found, mark for setup wizard
+	if cfg.APIKey == "" {
+		cfg.NeedsSetup = true
+	}
+
 	return cfg, nil
 }
 
@@ -122,9 +131,13 @@ func loadConfig() (*Config, error) {
 // ──────────────────────────────────────────────────────────────
 
 type savedConfig struct {
-	APIKey  string `json:"api_key,omitempty"`
-	BaseURL string `json:"base_url,omitempty"`
-	Model   string `json:"model,omitempty"`
+	APIKey         string `json:"api_key,omitempty"`
+	BaseURL        string `json:"base_url,omitempty"`
+	Model          string `json:"model,omitempty"`
+	GlueAPIKey     string `json:"glue_api_key,omitempty"`
+	GlueBaseURL    string `json:"glue_base_url,omitempty"`
+	GlueFastModel  string `json:"glue_fast_model,omitempty"`
+	GlueSmartModel string `json:"glue_smart_model,omitempty"`
 }
 
 func configPath() string {
@@ -164,50 +177,6 @@ func saveSavedConfig(sc savedConfig) error {
 	return os.WriteFile(path, data, 0600)
 }
 
-func promptForAPIKey() (string, error) {
-	reader := bufio.NewReader(os.Stdin)
-
-	fmt.Println()
-	fmt.Println("  Welcome to Codebase!")
-	fmt.Println()
-	fmt.Println("  No API key found. You need an OpenAI-compatible API key to use Codebase.")
-	fmt.Println("  Get one from: https://platform.openai.com/api-keys")
-	fmt.Println()
-	fmt.Print("  Enter your API key: ")
-
-	key, err := reader.ReadString('\n')
-	if err != nil {
-		return "", fmt.Errorf("failed to read input: %w", err)
-	}
-	key = strings.TrimSpace(key)
-	if key == "" {
-		return "", fmt.Errorf("no API key provided")
-	}
-
-	// Ask about base URL for non-OpenAI providers
-	fmt.Println()
-	fmt.Println("  Using OpenAI by default. If you use a different provider (Groq, local, etc.),")
-	fmt.Print("  enter the base URL (or press Enter to skip): ")
-
-	baseInput, _ := reader.ReadString('\n')
-	baseURL := strings.TrimSpace(baseInput)
-
-	// Save for next time
-	sc := loadSavedConfig()
-	sc.APIKey = key
-	if baseURL != "" {
-		sc.BaseURL = baseURL
-	}
-	if err := saveSavedConfig(sc); err != nil {
-		fmt.Fprintf(os.Stderr, "  Warning: could not save config: %v\n", err)
-	} else {
-		fmt.Println()
-		fmt.Println("  Saved to ~/.codebase/config.json")
-	}
-	fmt.Println()
-
-	return key, nil
-}
 
 // ──────────────────────────────────────────────────────────────
 //  Entry point

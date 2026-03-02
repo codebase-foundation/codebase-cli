@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"time"
 )
@@ -317,6 +318,85 @@ func truncateErrorBody(s string) string {
 		return s[:300] + "..."
 	}
 	return s
+}
+
+// ──────────────────────────────────────────────────────────────
+//  Model listing — query provider APIs for available models
+// ──────────────────────────────────────────────────────────────
+
+// listModels fetches available model IDs from an API provider.
+// protocol should be "openai" or "anthropic".
+func listModels(apiKey, baseURL, protocol string) ([]string, error) {
+	baseURL = strings.TrimSuffix(baseURL, "/")
+	client := &http.Client{Timeout: 15 * time.Second}
+
+	var req *http.Request
+	var err error
+
+	if protocol == ProtocolAnthropic {
+		req, err = http.NewRequest("GET", baseURL+"/v1/models", nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("x-api-key", apiKey)
+		req.Header.Set("anthropic-version", "2023-06-01")
+	} else {
+		req, err = http.NewRequest("GET", baseURL+"/models", nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("connection error: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("API error %d: %s", resp.StatusCode, truncateErrorBody(string(body)))
+	}
+
+	var result struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decode error: %v", err)
+	}
+
+	// Filter: keep only chat/completion models, skip embeddings/whisper/dall-e/tts
+	skipPrefixes := []string{"embedding", "text-embedding", "whisper", "dall-e", "tts", "davinci", "babbage", "ada"}
+	skipContains := []string{"embed", "whisper", "dall-e", "tts-", "moderation", "realtime"}
+
+	var models []string
+	for _, m := range result.Data {
+		id := strings.ToLower(m.ID)
+		skip := false
+		for _, p := range skipPrefixes {
+			if strings.HasPrefix(id, p) {
+				skip = true
+				break
+			}
+		}
+		if !skip {
+			for _, c := range skipContains {
+				if strings.Contains(id, c) {
+					skip = true
+					break
+				}
+			}
+		}
+		if !skip {
+			models = append(models, m.ID)
+		}
+	}
+
+	sort.Strings(models)
+	return models, nil
 }
 
 // humanizeError converts raw Go/API errors into user-friendly messages.

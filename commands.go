@@ -381,6 +381,15 @@ func init() {
 		},
 	},
 	{
+		name: "setup",
+		desc: "Re-run the setup wizard",
+		handler: func(m *chatModel, args string) tea.Cmd {
+			return func() tea.Msg {
+				return enterSetupMsg{}
+			}
+		},
+	},
+	{
 		name:    "quit",
 		aliases: []string{"exit", "q"},
 		desc:    "Exit codebase",

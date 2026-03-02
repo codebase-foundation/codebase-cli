@@ -8,41 +8,50 @@ import (
 )
 
 // ──────────────────────────────────────────────────────────────
-//  Root model — routes between boot and chat screens
+//  Root model — routes between setup, boot, and chat screens
 // ──────────────────────────────────────────────────────────────
 
 type screen int
 
 const (
-	screenBoot screen = iota
+	screenBoot  screen = iota
 	screenChat
+	screenSetup
 )
 
 type appModel struct {
 	screen screen
 	boot   bootModel
 	chat   chatModel
+	setup  setupModel
 	config *Config
 }
 
 func newAppModel(cfg *Config) appModel {
 	startScreen := screenBoot
-	if os.Getenv("CODEBASE_NOBOOT") != "" {
+	if cfg.NeedsSetup {
+		startScreen = screenSetup
+	} else if os.Getenv("CODEBASE_NOBOOT") != "" {
 		startScreen = screenChat
 	}
 	return appModel{
 		screen: startScreen,
 		boot:   newBootModel(cfg),
 		chat:   newChatModel(cfg),
+		setup:  newSetupModel(),
 		config: cfg,
 	}
 }
 
 func (m appModel) Init() tea.Cmd {
-	if m.screen == screenChat {
+	switch m.screen {
+	case screenSetup:
+		return m.setup.Init()
+	case screenChat:
 		return m.chat.Init()
+	default:
+		return m.boot.Init()
 	}
-	return m.boot.Init()
 }
 
 func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -54,13 +63,58 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	// Window size goes to both screens
+	// Window size goes to all screens
 	if wsMsg, ok := msg.(tea.WindowSizeMsg); ok {
 		m.boot.width = wsMsg.Width
 		m.boot.height = wsMsg.Height
 	}
 
 	switch m.screen {
+	case screenSetup:
+		switch msg := msg.(type) {
+		case setupDoneMsg:
+			// Save config
+			if err := saveSavedConfig(msg.config); err != nil {
+				// Continue anyway — config is in memory
+				_ = err
+			}
+			// Apply to runtime config
+			m.config.APIKey = msg.config.APIKey
+			m.config.BaseURL = msg.config.BaseURL
+			m.config.Model = msg.config.Model
+			m.config.NeedsSetup = false
+
+			// Set glue env vars
+			if msg.config.GlueAPIKey != "" {
+				os.Setenv("GLUE_API_KEY", msg.config.GlueAPIKey)
+			}
+			if msg.config.GlueBaseURL != "" {
+				os.Setenv("GLUE_BASE_URL", msg.config.GlueBaseURL)
+			}
+			if msg.config.GlueFastModel != "" {
+				os.Setenv("GLUE_FAST_MODEL", msg.config.GlueFastModel)
+			}
+			if msg.config.GlueSmartModel != "" {
+				os.Setenv("GLUE_SMART_MODEL", msg.config.GlueSmartModel)
+			}
+
+			// Recreate boot and chat models with updated config
+			m.boot = newBootModel(m.config)
+			m.chat = newChatModel(m.config)
+
+			// Transition to boot screen
+			if os.Getenv("CODEBASE_NOBOOT") != "" {
+				m.screen = screenChat
+				return m, m.chat.Init()
+			}
+			m.screen = screenBoot
+			return m, m.boot.Init()
+		default:
+			var cmd tea.Cmd
+			m.setup, cmd = m.setup.Update(msg)
+			return m, cmd
+		}
+
 	case screenBoot:
 		switch msg.(type) {
 		case bootDoneMsg:
@@ -78,6 +132,13 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	case screenChat:
+		// Check for setup command trigger
+		if setupMsg, ok := msg.(enterSetupMsg); ok {
+			_ = setupMsg
+			m.setup = newSetupModel()
+			m.screen = screenSetup
+			return m, m.setup.Init()
+		}
 		var cmd tea.Cmd
 		m.chat, cmd = m.chat.Update(msg)
 		return m, cmd
@@ -88,6 +149,8 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m appModel) View() string {
 	switch m.screen {
+	case screenSetup:
+		return m.setup.View()
 	case screenBoot:
 		return m.boot.View()
 	case screenChat:
@@ -95,6 +158,9 @@ func (m appModel) View() string {
 	}
 	return ""
 }
+
+// enterSetupMsg triggers the setup wizard from a /setup command.
+type enterSetupMsg struct{}
 
 // Cleanup gracefully shuts down background goroutines and processes.
 // Called from main.go's defer chain before terminal restoration.

@@ -608,9 +608,17 @@ func (m *chatModel) rebuildViewport() {
 	if !m.ready {
 		return
 	}
-	// Dynamic elements that reduce viewport space
-	notifyH := len(m.notify.active)
+	// Dynamic elements that reduce viewport space — must match compose logic exactly
 	taskH := m.taskPanelHeight()
+	activeToolH := 0
+	if m.state == chatStreaming {
+		activeToolH = 1
+	}
+	// notifyBar is only shown when activeToolLine is NOT showing
+	notifyH := 0
+	if activeToolH == 0 {
+		notifyH = len(m.notify.active)
+	}
 	pickerH := 0
 	if m.state == chatPermission {
 		pickerH = 2
@@ -618,10 +626,6 @@ func (m *chatModel) rebuildViewport() {
 	suggestH := 0
 	if len(m.suggestions) > 0 && m.state == chatIdle {
 		suggestH = 1
-	}
-	activeToolH := 0
-	if m.state == chatStreaming {
-		activeToolH = 1
 	}
 	// Fixed: header(1) + topSep(1) + bottomSep(1) + input(1) = 4
 	targetH := m.height - 4 - notifyH - taskH - pickerH - suggestH - activeToolH
@@ -917,14 +921,20 @@ func (m *chatModel) handleAgentEvent(evt AgentEvent) tea.Cmd {
 		m.turns = evt.Turn
 		if evt.Turn > 1 {
 			m.flushStreamingText()
-			dividerText := "continuing..."
-			if m.lastNarrationText != "" {
-				dividerText = m.lastNarrationText
+			dividerText := m.lastNarrationText
+			// If no narration yet, generate one now from recent actions
+			if dividerText == "" && len(m.recentActions) > 0 {
+				dividerText = m.glue.Narrate(m.recentActions)
+				if dividerText != "" {
+					m.lastNarrationText = dividerText
+				}
 			}
-			line := "─── " + dividerText + " ───"
+			if dividerText == "" {
+				dividerText = fmt.Sprintf("turn %d", evt.Turn)
+			}
 			m.segments = append(m.segments, segment{
 				kind: "divider",
-				text: "\n" + styleDim.Render("  "+line) + "\n\n",
+				text: "\n  " + renderGradientText(dividerText, activeTheme.Accent, activeTheme.Cyan, activeTheme.Purple) + "\n\n",
 			})
 			m.rebuildViewport()
 		}
@@ -1137,8 +1147,7 @@ func (m chatModel) View() string {
 	}
 	switch m.state {
 	case chatStreaming:
-		activity := m.currentToolActivity()
-		statusParts = append(statusParts, m.spinner.View()+" "+styleMuted.Render(activity))
+		statusParts = append(statusParts, styleMuted.Render("streaming"))
 	case chatPermission:
 		statusParts = append(statusParts, styleWarn.Render("⚡ permission"))
 	case chatPlanning:
@@ -1277,7 +1286,7 @@ func (m chatModel) View() string {
 	if taskPanel != "" {
 		out.WriteString(taskPanel + "\n")
 	}
-	if notifyBar != "" {
+	if notifyBar != "" && activeToolLine == "" {
 		out.WriteString(notifyBar) // already includes trailing \n per line
 	}
 	if activeToolLine != "" {
