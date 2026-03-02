@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -61,13 +63,13 @@ debug, and modify software projects.
 Available tools:
 - read_file: Read file contents with line numbers. Use offset/limit for large files.
 - write_file: Create or overwrite a file. Parent directories are created automatically.
-- edit_file: Surgical find-and-replace in a file. old_text must match exactly and be unique.
+- edit_file: Surgical find-and-replace in a file. old_text must match exactly and be unique. If old_text is not found, re-read the file and check for exact whitespace and line endings.
 - multi_edit: Batch multiple edits across files. Per-file atomicity with rollback.
 - list_files: List directory contents or glob for files (e.g. "**/*.go").
 - search_files: Regex search across files (powered by ripgrep). Find definitions, usages, etc.
 - web_search: Search the web. Use for current info, docs, versions, error solutions, or anything not in local files.
 - dispatch_agent: Spawn a read-only research subagent to investigate questions in isolated context.
-- shell: Run any shell command. Use for builds, tests, package management.
+- shell: Run a shell command. Use for builds, tests, package management, and any terminal task.
 - git_status: Show working tree status (staged, unstaged, untracked files).
 - git_diff: Show file diffs (staged, unstaged, or between refs).
 - git_log: Show recent commit history.
@@ -79,15 +81,20 @@ Available tools:
 - get_task: Get full details of a specific task.
 
 Guidelines:
+- ALWAYS read a file before editing it — never guess at file contents
+- ALWAYS use search_files or list_files to explore before assuming project structure
 - You can call multiple tools in parallel — read_file, list_files, search_files, web_search, dispatch_agent, list_tasks, and get_task all run concurrently
-- Use list_files and search_files to explore the project before making changes
-- Read files before editing them — understand existing code first
 - Make targeted, minimal changes — don't rewrite entire files unnecessarily
 - For multiple related edits, prefer multi_edit over separate edit_file calls
 - Use git tools instead of shell for git operations — they provide structured output
-- After you edit files, the system may report diagnostics (errors, warnings) from language tools. If diagnostics appear, fix the issues before moving on.
-- If a tool fails, read the error and try a different approach
+- After you edit files, the system may report diagnostics (errors, warnings) from language tools. If diagnostics appear, fix the issues before moving on
 - When finished, briefly summarize what you changed and why
+
+Error recovery:
+- If edit_file fails with "old_text not found", re-read the file to see the actual content, then retry with corrected text
+- If edit_file fails with "found N times", add more surrounding context lines to old_text to make it unique
+- If a shell command fails, read the error output carefully and try a different approach
+- Never repeat a failed tool call with identical arguments
 
 Task management:
 - For multi-step work (3+ steps), create tasks upfront so the user can track progress
@@ -133,8 +140,23 @@ func strPtr(s string) *string { return &s }
 func buildSystemPrompt(workDir string) string {
 	var sb strings.Builder
 	sb.WriteString(systemPrompt)
-	sb.WriteString(fmt.Sprintf("\n\nCurrent date: %s\n", time.Now().Format("2006-01-02")))
-	sb.WriteString(fmt.Sprintf("Working directory: %s\n", workDir))
+
+	// Environment context
+	sb.WriteString("\n\n## Environment\n\n")
+	sb.WriteString(fmt.Sprintf("- Platform: %s/%s\n", runtime.GOOS, runtime.GOARCH))
+	sb.WriteString(fmt.Sprintf("- Shell: %s\n", detectShellName()))
+	sb.WriteString(fmt.Sprintf("- Date: %s\n", time.Now().Format("2006-01-02")))
+	sb.WriteString(fmt.Sprintf("- Working directory: %s\n", workDir))
+
+	// Git context
+	if branch := getGitBranch(workDir); branch != "" {
+		sb.WriteString(fmt.Sprintf("- Git branch: %s\n", branch))
+	}
+
+	// Platform-specific shell guidance
+	if runtime.GOOS == "windows" {
+		sb.WriteString("\nShell commands run in PowerShell. Use PowerShell syntax (e.g. `Get-ChildItem` not `ls`, `Remove-Item` not `rm`, `;` or `&&` to chain commands).\n")
+	}
 
 	// Load project instructions if available
 	projectInstructions := loadProjectInstructions(workDir)
@@ -153,6 +175,35 @@ func buildSystemPrompt(workDir string) string {
 	}
 
 	return sb.String()
+}
+
+// detectShellName returns the name of the shell that will be used for commands.
+func detectShellName() string {
+	if runtime.GOOS == "windows" {
+		if _, err := exec.LookPath("pwsh"); err == nil {
+			return "pwsh (PowerShell Core)"
+		}
+		if _, err := exec.LookPath("powershell"); err == nil {
+			return "powershell (Windows PowerShell)"
+		}
+		return "cmd.exe"
+	}
+	shell := os.Getenv("SHELL")
+	if shell == "" {
+		return "/bin/sh"
+	}
+	return filepath.Base(shell)
+}
+
+// getGitBranch returns the current git branch name, or empty if not in a git repo.
+func getGitBranch(workDir string) string {
+	cmd := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
+	cmd.Dir = workDir
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }
 
 // loadProjectInstructions looks for project config files (AGENTS.md, CLAUDE.md,

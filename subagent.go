@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"runtime"
 	"strings"
 )
 
@@ -18,7 +19,7 @@ import (
 
 const subagentMaxTurns = 25
 
-const subagentSystemPrompt = `You are a focused research assistant. You help gather information by reading files, searching code, and listing directories.
+const subagentSystemPromptBase = `You are a focused research assistant. You help gather information by reading files, searching code, and listing directories.
 
 You have read-only access to the project. You CANNOT modify any files.
 
@@ -29,7 +30,7 @@ Guidelines:
 - Use search_files to find relevant code quickly
 - Use list_files to explore project structure
 - Use web_search when you need external documentation, API references, or current information
-- Use shell for read-only commands only (ls, cat, grep, git log, etc.)
+- Use shell for read-only commands only (e.g. git log, git status, directory listings)
 - When done, provide a clear, concise summary of your findings`
 
 // subagentToolDefs contains only read-only tools.
@@ -47,7 +48,7 @@ func init() {
 
 // RunSubagent executes a read-only research subagent and returns its final text.
 func RunSubagent(client *LLMClient, workDir, task string) (string, error) {
-	sysContent := subagentSystemPrompt + fmt.Sprintf("\n\nWorking directory: %s", workDir)
+	sysContent := subagentSystemPromptBase + fmt.Sprintf("\n\nPlatform: %s\nWorking directory: %s", runtime.GOOS, workDir)
 
 	history := []ChatMessage{
 		{Role: "system", Content: strPtr(sysContent)},
@@ -145,14 +146,24 @@ func RunSubagent(client *LLMClient, workDir, task string) (string, error) {
 
 // shellWritePatterns detects commands that modify the filesystem.
 var shellWritePatterns = []string{
+	// Unix
 	"rm ", "rm\t", "rmdir", "mv ", "mv\t", "cp ", "cp\t",
 	"mkdir", "touch ", "chmod", "chown",
 	"tee ", "tee\t", "truncate",
+	"sed -i", "patch ",
+	// Windows / PowerShell
+	"del ", "del\t", "erase ", "rd ", "rd\t",
+	"move ", "move\t", "copy ", "copy\t", "xcopy",
+	"ren ", "rename ", "md ", "md\t",
+	"remove-item", "move-item", "copy-item",
+	"new-item", "set-content", "add-content",
+	"out-file", "invoke-webrequest",
+	// Git (cross-platform)
 	"git checkout", "git reset", "git clean", "git stash",
 	"git merge", "git rebase", "git commit", "git push",
+	// Package managers (cross-platform)
 	"npm install", "yarn add", "pip install",
 	"go install", "go get",
-	"sed -i", "patch ",
 }
 
 // executeReadOnlyShell runs a shell command but blocks write-like commands.

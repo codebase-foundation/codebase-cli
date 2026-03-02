@@ -61,18 +61,30 @@ func shellNeedsPermission(cmd string) bool {
 	cmdLower := strings.ToLower(strings.TrimSpace(cmd))
 
 	readOnlyPrefixes := []string{
+		// Unix
 		"ls", "cat ", "head ", "tail ", "grep ", "rg ", "find ",
 		"wc ", "file ", "which ", "echo ", "pwd", "env", "printenv",
+		"du ", "df ", "stat ", "date", "uname",
+		"jq ", "sort ", "uniq ", "tr ",
+		// Windows / PowerShell
+		"dir ", "dir", "type ", "where ", "where.exe",
+		"get-content ", "get-childitem ", "get-item ",
+		"get-location", "get-process",
+		"select-string ", "measure-object",
+		"test-path ", "resolve-path",
+		"systeminfo", "hostname", "whoami",
+		"write-host ", "write-output ",
+		// Git (cross-platform)
 		"git status", "git log", "git diff", "git show", "git branch",
 		"git remote", "git tag", "git stash list",
+		// Build/test (cross-platform)
 		"go vet", "go build", "go test", "go run",
-		"tsc ", "npx tsc", "npm test", "npm run", "npm ls",
-		"pytest", "python -c", "python3 -c",
+		"tsc ", "npx tsc", "npx ", "npm test", "npm run", "npm ls",
+		"pytest", "python -c", "python3 -c", "python -m pytest",
 		"cargo check", "cargo test", "cargo build",
 		"make ", "make -n", "make check",
-		"du ", "df ", "stat ", "date", "uname",
 		"node -e", "node --eval",
-		"jq ", "sort ", "uniq ", "tr ",
+		"dotnet build", "dotnet test",
 	}
 
 	for _, prefix := range readOnlyPrefixes {

@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -338,17 +339,14 @@ var toolDefs = []ToolDef{
 	{
 		Type: "function",
 		Function: ToolDefFunction{
-			Name: "shell",
-			Description: "Execute a shell command in the project directory. " +
-				"Use for: running builds, tests, installing packages, git commands, and any terminal task. " +
-				"Commands run in a bash shell. The full stdout + stderr is returned. " +
-				"Long-running commands are killed after the timeout.",
+			Name:        "shell",
+			Description: shellToolDescription(),
 			Parameters: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
 					"command": map[string]interface{}{
 						"type":        "string",
-						"description": "The shell command to execute. Use && to chain commands.",
+						"description": shellCommandDescription(),
 					},
 				},
 				"required": []string{"command"},
@@ -1139,17 +1137,79 @@ func toolWebSearch(args map[string]interface{}) (string, bool) {
 
 // ── shell ────────────────────────────────────────────────────
 
+// shellToolDescription returns a platform-aware description for the shell tool.
+func shellToolDescription() string {
+	if runtime.GOOS == "windows" {
+		return "Execute a shell command in the project directory. " +
+			"Use for: running builds, tests, installing packages, git commands, and any terminal task. " +
+			"Commands run in PowerShell on Windows. The full stdout + stderr is returned. " +
+			"Long-running commands are killed after the timeout."
+	}
+	return "Execute a shell command in the project directory. " +
+		"Use for: running builds, tests, installing packages, git commands, and any terminal task. " +
+		"Commands run in a bash shell. The full stdout + stderr is returned. " +
+		"Long-running commands are killed after the timeout."
+}
+
+// shellCommandDescription returns platform-aware help for the command parameter.
+func shellCommandDescription() string {
+	if runtime.GOOS == "windows" {
+		return "The shell command to execute. Use ; or && to chain commands. Use PowerShell syntax."
+	}
+	return "The shell command to execute. Use && to chain commands."
+}
+
 // dangerousPatterns detects potentially destructive shell commands.
-var dangerousPatterns = []string{
-	"rm -rf /",
-	"rm -rf ~",
-	"rm -rf $HOME",
-	":(){:|:&};:",    // fork bomb
-	"mkfs.",
-	"dd if=",
-	"> /dev/sd",
-	"chmod -R 777 /",
-	":(){ :|:& };:", // fork bomb variant
+var dangerousPatterns = func() []string {
+	base := []string{
+		"rm -rf /",
+		"rm -rf ~",
+		"rm -rf $HOME",
+		":(){:|:&};:",    // fork bomb
+		"mkfs.",
+		"dd if=",
+		"> /dev/sd",
+		"chmod -R 777 /",
+		":(){ :|:& };:", // fork bomb variant
+	}
+	if runtime.GOOS == "windows" {
+		base = append(base,
+			"format c:",
+			"format d:",
+			"del /f /s /q c:\\",
+			"rd /s /q c:\\",
+			"rmdir /s /q c:\\",
+			"remove-item -recurse -force c:\\",
+			"remove-item -recurse -force $env:",
+		)
+	}
+	return base
+}()
+
+// getShellCommand returns the appropriate shell binary and args for the platform.
+func getShellCommand(command string) *exec.Cmd {
+	if runtime.GOOS == "windows" {
+		// Try PowerShell first (pwsh = PowerShell Core, powershell = Windows PowerShell)
+		if _, err := exec.LookPath("pwsh"); err == nil {
+			return exec.Command("pwsh", "-NoProfile", "-NonInteractive", "-Command", command)
+		}
+		if _, err := exec.LookPath("powershell"); err == nil {
+			return exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", command)
+		}
+		// Fallback to cmd.exe
+		shell := os.Getenv("COMSPEC")
+		if shell == "" {
+			shell = "cmd.exe"
+		}
+		return exec.Command(shell, "/C", command)
+	}
+
+	// Unix: use SHELL env var, fallback to /bin/sh
+	shell := os.Getenv("SHELL")
+	if shell == "" {
+		shell = "/bin/sh"
+	}
+	return exec.Command(shell, "-c", command)
 }
 
 func toolShell(args map[string]interface{}, workDir string) (string, bool) {
@@ -1166,7 +1226,7 @@ func toolShell(args map[string]interface{}, workDir string) (string, bool) {
 		}
 	}
 
-	cmd := exec.Command("bash", "-c", command)
+	cmd := getShellCommand(command)
 	cmd.Dir = workDir
 	cmd.Env = append(os.Environ(),
 		"TERM=dumb",
