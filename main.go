@@ -214,6 +214,8 @@ func promptForAPIKey() (string, error) {
 // ──────────────────────────────────────────────────────────────
 
 func main() {
+	loadDotEnv()
+
 	cfg, err := loadConfig()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)

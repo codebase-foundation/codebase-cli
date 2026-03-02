@@ -207,13 +207,9 @@ func buildBootSteps(cfg *Config) []bootStep {
 
 // ── Bubble Tea ───────────────────────────────────────────────
 
-// demoFPS returns the frame interval for the boot animation.
-// Throttled in VS Code/Cursor to prevent PTY flooding that affects other terminals.
+// demoFPS returns the frame interval for the boot animation (~20fps).
 func demoFPS() time.Duration {
-	if termInfo.IsVSCode || termInfo.IsCursor {
-		return 120 * time.Millisecond // ~8fps — gentle on VS Code's terminal handler
-	}
-	return 50 * time.Millisecond // ~20fps — full speed in standalone terminals
+	return 50 * time.Millisecond
 }
 
 func (m bootModel) Init() tea.Cmd {
@@ -538,10 +534,6 @@ func (m bootModel) renderLogo(px []rgb, w, h, ox, oy, scale int, t, reveal float
 				}
 			}
 
-			// Glow (skip in VS Code to reduce ANSI output volume)
-			if termInfo.IsVSCode || termInfo.IsCursor {
-				continue
-			}
 			for dy := -glowR; dy <= scale+glowR; dy++ {
 				for dx := -glowR; dx <= scale+glowR; dx++ {
 					x := ox + lx*scale + dx
