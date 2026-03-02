@@ -12,10 +12,10 @@ import (
 //  Tool block rendering
 // ──────────────────────────────────────────────────────────────
 
-// renderToolBlock builds a bordered tool execution block.
+// renderToolBlock builds a tool execution block with left accent bar.
 // State: "pending" (spinner), "success" (✓), "error" (✗)
 func renderToolBlock(toolName string, args map[string]any, output string, state string, width int, workDir string) string {
-	innerW := width - 4 // border + padding
+	innerW := width - 3 // left border (1) + padding (1) + breathing room (1)
 	if innerW < 20 {
 		innerW = 20
 	}
@@ -37,50 +37,70 @@ func renderToolBlock(toolName string, args map[string]any, output string, state 
 
 	// Build the label
 	label := styleToolName.Render(toolName)
-	pathStr := ""
+	detail := ""
 	if args != nil {
 		if p, ok := args["path"]; ok {
 			if s, ok := p.(string); ok {
-				display := styleFilePath.Render(s)
-				// Wrap in OSC 8 hyperlink if terminal supports it
-				absPath := s
-				if !filepath.IsAbs(s) && workDir != "" {
-					absPath = filepath.Join(workDir, s)
-				}
-				pathStr = " " + FileLink(absPath, display)
+				detail = s
 			}
 		}
 		if toolName == "search_files" {
 			if p, ok := args["pattern"]; ok {
 				if s, ok := p.(string); ok {
-					pathStr = " " + styleFilePath.Render(s)
+					detail = s
 				}
 			}
 		}
 		if toolName == "git_commit" {
 			if m, ok := args["message"]; ok {
 				if s, ok := m.(string); ok {
-					msg := s
-					if len(msg) > 40 {
-						msg = msg[:37] + "..."
-					}
-					pathStr = " " + styleFilePath.Render(msg)
+					detail = s
 				}
 			}
 		}
 		if toolName == "git_branch" {
 			if n, ok := args["name"]; ok {
-				if s, ok := n.(string); ok && s != "" {
-					pathStr = " " + styleFilePath.Render(s)
+				if s, ok := n.(string); ok {
+					detail = s
 				}
 			}
 		}
 		if toolName == "create_task" || toolName == "update_task" {
 			if s, ok := args["subject"]; ok {
 				if str, ok := s.(string); ok {
-					pathStr = " " + styleFilePath.Render(str)
+					detail = str
 				}
 			}
+		}
+	}
+
+	// Truncate detail to fit: " label detail icon" must fit in innerW
+	// label + icon + spaces ≈ len(toolName) + 5
+	maxDetail := innerW - len(toolName) - 5
+	if maxDetail < 10 {
+		maxDetail = 10
+	}
+	if len(detail) > maxDetail {
+		detail = detail[:maxDetail-3] + "..."
+	}
+
+	// Style the detail and wrap in hyperlink if applicable
+	pathStr := ""
+	if detail != "" {
+		if args != nil {
+			if p, ok := args["path"]; ok {
+				if s, ok := p.(string); ok && s != "" {
+					absPath := detail
+					if !filepath.IsAbs(s) && workDir != "" {
+						absPath = filepath.Join(workDir, detail)
+					}
+					pathStr = " " + FileLink(absPath, styleFilePath.Render(detail))
+				}
+			} else {
+				pathStr = " " + styleFilePath.Render(detail)
+			}
+		} else {
+			pathStr = " " + styleFilePath.Render(detail)
 		}
 	}
 
@@ -122,7 +142,7 @@ func renderToolBlock(toolName string, args map[string]any, output string, state 
 		content = header
 	}
 
-	return style.Width(innerW + 2).Render(content)
+	return style.Width(innerW).Render(content)
 }
 
 // ── File preview (write_file) ────────────────────────────────

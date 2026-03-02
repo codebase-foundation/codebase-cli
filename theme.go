@@ -223,16 +223,20 @@ func initStyles() {
 		BorderForeground(colPurple).
 		Padding(0, 1)
 
-	// Tool block styles
+	// Tool block styles — left accent bar only
+	toolBorder := lipgloss.ThickBorder()
 	styleToolPending = lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(colOrange)
+		Border(toolBorder, false, false, false, true).
+		BorderForeground(colOrange).
+		PaddingLeft(1)
 	styleToolSuccess = lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(colSuccess)
+		Border(toolBorder, false, false, false, true).
+		BorderForeground(colSuccess).
+		PaddingLeft(1)
 	styleToolError = lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(colError)
+		Border(toolBorder, false, false, false, true).
+		BorderForeground(colError).
+		PaddingLeft(1)
 
 	// Text styles
 	styleUserLabel = lipgloss.NewStyle().Foreground(colAccent).Bold(true)

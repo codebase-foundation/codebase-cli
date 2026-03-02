@@ -70,6 +70,7 @@ type chatModel struct {
 	// Permission
 	permRequest *PermissionRequest // current pending permission prompt
 	permCount   int                // how many permission prompts shown this session
+	permChoice  int                // 0=allow, 1=deny, 2=always, 3=trust all
 
 	// Glue + notifications
 	glue          *GlueClient
@@ -266,24 +267,49 @@ func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 			}
 			return m, tea.Quit
 
+		// Permission picker — arrow keys to select, enter to confirm
+		case "left", "h":
+			if m.state == chatPermission {
+				if m.permChoice > 0 {
+					m.permChoice--
+				}
+				return m, nil
+			}
+		case "right", "l":
+			if m.state == chatPermission {
+				if m.permChoice < 3 {
+					m.permChoice++
+				}
+				return m, nil
+			}
+
 		// Permission single-key shortcuts — respond instantly without enter
-		case "y", "n", "a":
+		case "y":
 			if m.state == chatPermission {
 				m.input.SetValue("")
-				return m.handlePermissionResponse(msg.String()), m.waitForEvent()
+				return m.handlePermissionResponse("y"), m.waitForEvent()
+			}
+		case "n":
+			if m.state == chatPermission {
+				m.input.SetValue("")
+				return m.handlePermissionResponse("n"), m.waitForEvent()
+			}
+		case "a":
+			if m.state == chatPermission {
+				m.input.SetValue("")
+				return m.handlePermissionResponse("a"), m.waitForEvent()
 			}
 
 		case "enter":
+			// Permission: enter confirms the picker selection
+			if m.state == chatPermission {
+				m.input.SetValue("")
+				choices := []string{"y", "n", "a", "all"}
+				return m.handlePermissionResponse(choices[m.permChoice]), m.waitForEvent()
+			}
+
 			prompt := strings.TrimSpace(m.input.Value())
 			m.input.SetValue("")
-
-			// Permission: enter with empty input = allow
-			if m.state == chatPermission {
-				if prompt == "" {
-					prompt = "y"
-				}
-				return m.handlePermissionResponse(prompt), m.waitForEvent()
-			}
 
 			if prompt == "" {
 				return m, nil
@@ -536,13 +562,13 @@ func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 		cmds = append(cmds, cmd)
 		// Cycle spinner color through accent palette
 		m.spinner.Style = lipgloss.NewStyle().Foreground(spinnerColors[m.notify.frame%len(spinnerColors)])
-		// Only re-render for spinner if there are pending tools (avoids 80ms full rebuild)
-		if m.state == chatStreaming && m.toolsPending > 0 {
+		// Re-render for spinner during active states
+		if m.state == chatStreaming || m.state == chatPermission {
 			m.rebuildViewport()
 		}
 	}
 
-	if m.state == chatIdle || m.state == chatPlanning || m.state == chatPlanReview || m.state == chatPermission {
+	if m.state == chatIdle || m.state == chatPlanning || m.state == chatPlanReview {
 		var cmd tea.Cmd
 		m.input, cmd = m.input.Update(msg)
 		cmds = append(cmds, cmd)
@@ -560,11 +586,11 @@ func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 }
 
 func (m *chatModel) setupViewport() {
-	h := m.height - 5 // frame borders + header + input + padding
+	h := m.height - 4 // header + topSep + bottomSep + input
 	if h < 5 {
 		h = 5
 	}
-	w := m.width - 4
+	w := m.width
 	if w < 20 {
 		w = 20
 	}
@@ -582,10 +608,23 @@ func (m *chatModel) rebuildViewport() {
 	if !m.ready {
 		return
 	}
-	// Adjust viewport height for notifications + task panel
+	// Dynamic elements that reduce viewport space
 	notifyH := len(m.notify.active)
 	taskH := m.taskPanelHeight()
-	targetH := m.height - 5 - notifyH - taskH
+	pickerH := 0
+	if m.state == chatPermission {
+		pickerH = 2
+	}
+	suggestH := 0
+	if len(m.suggestions) > 0 && m.state == chatIdle {
+		suggestH = 1
+	}
+	activeToolH := 0
+	if m.state == chatStreaming {
+		activeToolH = 1
+	}
+	// Fixed: header(1) + topSep(1) + bottomSep(1) + input(1) = 4
+	targetH := m.height - 4 - notifyH - taskH - pickerH - suggestH - activeToolH
 	if targetH < 5 {
 		targetH = 5
 	}
@@ -594,7 +633,7 @@ func (m *chatModel) rebuildViewport() {
 	}
 
 	var sb strings.Builder
-	contentW := m.width - 8
+	contentW := m.width - 4
 
 	for _, seg := range m.segments {
 		switch seg.kind {
@@ -1018,7 +1057,8 @@ func (m *chatModel) handleAgentEvent(evt AgentEvent) tea.Cmd {
 		m.flushStreamingText()
 		m.state = chatPermission
 		m.permRequest = evt.Permission
-		// Render compact permission block
+		m.permChoice = 0 // default to "Allow"
+		// Render compact permission context block (picker is rendered below viewport)
 		summary := evt.Permission.Summary
 		permBlock := lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
@@ -1030,7 +1070,7 @@ func (m *chatModel) handleAgentEvent(evt AgentEvent) tea.Cmd {
 			kind: "text",
 			text: "\n  " + permBlock + "\n",
 		})
-		m.input.Placeholder = "enter to allow, n to deny, a to always allow..."
+		m.input.Placeholder = ""
 		m.permCount++
 		if m.permCount == 1 {
 			m.notify.Push(Notification{Type: NotifyInfo, Text: "Tip: /trust all to auto-approve this session", Duration: 8 * time.Second})
@@ -1086,13 +1126,15 @@ func (m chatModel) View() string {
 	totalTokens := m.tokens.PromptTokens + m.tokens.CompletionTokens
 	var tokenStr string
 	if totalTokens >= 1000 {
-		tokenStr = styleMuted.Render(fmt.Sprintf("%.1fk tokens", float64(totalTokens)/1000))
+		tokenStr = styleMuted.Render(fmt.Sprintf("%.1fk tok", float64(totalTokens)/1000))
 	} else {
-		tokenStr = styleMuted.Render(fmt.Sprintf("%d tokens", totalTokens))
+		tokenStr = styleMuted.Render(fmt.Sprintf("%d tok", totalTokens))
 	}
-	fileStr := styleMuted.Render(fmt.Sprintf("%d files", m.files))
-
-	statusParts := []string{modelStr, tokenStr, fileStr}
+	dot := styleDim.Render(" · ")
+	statusParts := []string{modelStr, tokenStr}
+	if m.files > 0 {
+		statusParts = append(statusParts, styleMuted.Render(fmt.Sprintf("%d files", m.files)))
+	}
 	switch m.state {
 	case chatStreaming:
 		activity := m.currentToolActivity()
@@ -1103,18 +1145,19 @@ func (m chatModel) View() string {
 		statusParts = append(statusParts, lipgloss.NewStyle().Foreground(colPurple).Render("◆ planning"))
 	case chatPlanReview:
 		statusParts = append(statusParts, lipgloss.NewStyle().Foreground(colPurple).Render("◆ review"))
+	case chatDoneFlash:
+		statusParts = append(statusParts, styleOK.Render("✓ done"))
 	}
-	statusRight := strings.Join(statusParts, styleDim.Render(" │ "))
+	statusRight := strings.Join(statusParts, dot)
 
 	titleLeft := styleAccentText.Render(" codebase")
 	if m.title != "" {
 		titleLeft += styleDim.Render(" · ") + styleMuted.Render(m.title)
 	}
 
-	gap := m.width - lipgloss.Width(titleLeft) - lipgloss.Width(statusRight) - 6
-	// If title is too long, truncate it to fit
+	gap := m.width - lipgloss.Width(titleLeft) - lipgloss.Width(statusRight) - 2
 	if gap < 1 && m.title != "" {
-		maxTitle := m.width - lipgloss.Width(styleAccentText.Render(" codebase")) - lipgloss.Width(statusRight) - lipgloss.Width(styleDim.Render(" · ")) - 10
+		maxTitle := m.width - lipgloss.Width(styleAccentText.Render(" codebase")) - lipgloss.Width(statusRight) - lipgloss.Width(styleDim.Render(" · ")) - 6
 		if maxTitle > 3 {
 			truncated := m.title
 			runes := []rune(truncated)
@@ -1125,37 +1168,20 @@ func (m chatModel) View() string {
 		} else {
 			titleLeft = styleAccentText.Render(" codebase")
 		}
-		gap = m.width - lipgloss.Width(titleLeft) - lipgloss.Width(statusRight) - 6
+		gap = m.width - lipgloss.Width(titleLeft) - lipgloss.Width(statusRight) - 2
 	}
 	if gap < 1 {
 		gap = 1
 	}
 	header := titleLeft + strings.Repeat(" ", gap) + statusRight
 
-	// ── Task panel ──────────────────────────────────────────
-	taskPanel := m.renderTaskPanel()
-
-	// ── Notifications ────────────────────────────────────────
-	notifyBar := m.notify.Render(m.width)
-
-	// ── Scroll indicator ─────────────────────────────────────
-	scrollIndicator := ""
-	if m.userScrolled && m.viewport.TotalLineCount() > m.viewport.Height {
-		pct := 0
-		if m.viewport.TotalLineCount()-m.viewport.Height > 0 {
-			pct = int(float64(m.viewport.YOffset) / float64(m.viewport.TotalLineCount()-m.viewport.Height) * 100)
-		}
-		scrollIndicator = styleDim.Render(fmt.Sprintf(" ↑ %d%% — ↓ scroll to resume auto-scroll", pct)) + "\n"
-	}
-
-	// ── Body ─────────────────────────────────────────────────
-	body := m.viewport.View()
-
-	// ── Frame ────────────────────────────────────────────────
-	var frame lipgloss.Style
+	// ── Separator color (state feedback) ─────────────────────
+	var sepColor lipgloss.Color
 	switch m.state {
-	case chatStreaming, chatPermission:
-		frame = styleFrameActive.Width(m.width - 2)
+	case chatStreaming:
+		sepColor = colBorderHi
+	case chatPermission:
+		sepColor = colOrange
 	case chatDoneFlash:
 		colorIdx := len(flashCycleColors) - m.flashFrames
 		if colorIdx < 0 {
@@ -1164,68 +1190,78 @@ func (m chatModel) View() string {
 		if colorIdx >= len(flashCycleColors) {
 			colorIdx = len(flashCycleColors) - 1
 		}
-		frame = lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(flashCycleColors[colorIdx]).
-			Padding(0, 1).
-			Width(m.width - 2)
+		sepColor = flashCycleColors[colorIdx]
 	case chatPlanning, chatPlanReview:
-		frame = styleFramePlan.Width(m.width - 2)
+		sepColor = colPurple
 	default:
-		frame = styleFrame.Width(m.width - 2)
+		sepColor = colBorder
 	}
+	sepStyle := lipgloss.NewStyle().Foreground(sepColor)
+	topSep := sepStyle.Render(strings.Repeat("─", m.width))
 
-	// Scanline sweep during completion flash
-	if m.state == chatDoneFlash && m.flashFrames > 0 {
-		bodyLines := strings.Split(body, "\n")
-		totalLines := len(bodyLines)
-		if totalLines > 0 {
-			// Sweep from bottom to top
-			scanY := totalLines - (m.flashFrames * totalLines / 6)
-			if scanY >= 0 && scanY < totalLines {
-				scanColor := flashCycleColors[len(flashCycleColors)-m.flashFrames]
-				bodyLines[scanY] = lipgloss.NewStyle().
-					Background(scanColor).
-					Foreground(lipgloss.Color("#000000")).
-					Width(m.width - 6).
-					Render(bodyLines[scanY])
-			}
-			body = strings.Join(bodyLines, "\n")
+	// Bottom separator — embed scroll % when user scrolled up
+	var bottomSep string
+	if m.userScrolled && m.viewport.TotalLineCount() > m.viewport.Height {
+		pct := 0
+		if m.viewport.TotalLineCount()-m.viewport.Height > 0 {
+			pct = int(float64(m.viewport.YOffset) / float64(m.viewport.TotalLineCount()-m.viewport.Height) * 100)
 		}
+		label := fmt.Sprintf(" ↑ %d%% ", pct)
+		labelW := lipgloss.Width(label)
+		leftLen := (m.width - labelW) / 2
+		rightLen := m.width - leftLen - labelW
+		if leftLen < 0 {
+			leftLen = 0
+		}
+		if rightLen < 0 {
+			rightLen = 0
+		}
+		bottomSep = sepStyle.Render(strings.Repeat("─", leftLen)) +
+			styleDim.Render(label) +
+			sepStyle.Render(strings.Repeat("─", rightLen))
+	} else {
+		bottomSep = topSep
 	}
 
-	var innerContent string
-	parts := []string{header}
-	if taskPanel != "" {
-		parts = append(parts, taskPanel)
+	// ── Task panel + notifications (above viewport) ──────────
+	taskPanel := m.renderTaskPanel()
+	notifyBar := m.notify.Render(m.width)
+
+	// ── Activity status (pinned above bottom sep) ───────────
+	activeToolLine := ""
+	if m.state == chatStreaming {
+		activeToolLine = m.renderActiveToolLine()
 	}
-	if notifyBar != "" {
-		parts = append(parts, notifyBar)
+
+	// ── Permission picker ────────────────────────────────────
+	permPicker := ""
+	if m.state == chatPermission {
+		permPicker = m.renderPermissionPicker()
 	}
-	innerContent = strings.Join(parts, "\n") + "\n" + scrollIndicator + body
-	framedBody := frame.Render(innerContent)
 
 	// ── Suggestions ──────────────────────────────────────────
 	suggestBar := ""
 	if len(m.suggestions) > 0 && m.state == chatIdle {
-		suggestBar = renderSuggestions(m.suggestions, m.width) + "\n"
+		suggestBar = renderSuggestions(m.suggestions, m.width)
 	}
+
+	// ── Viewport ─────────────────────────────────────────────
+	body := m.viewport.View()
 
 	// ── Input ────────────────────────────────────────────────
 	inputLine := OSC633PromptStart() + " " + m.input.View() + OSC633PromptEnd()
-	sep := styleDim.Render(" · ")
 	var hint string
 	switch m.state {
 	case chatStreaming:
-		hint = styleDim.Render("ctrl+c stop") + sep + styleDim.Render("↑↓ scroll")
+		hint = styleDim.Render("ctrl+c stop") + dot + styleDim.Render("↑↓ scroll")
 	case chatPermission:
-		hint = styleDim.Render("enter allow") + sep + styleDim.Render("n deny") + sep + styleDim.Render("a always") + sep + styleDim.Render("ctrl+c stop")
+		hint = styleDim.Render("←→ select") + dot + styleDim.Render("enter confirm") + dot + styleDim.Render("y/n/a")
 	case chatPlanning:
-		hint = styleDim.Render("ctrl+c cancel") + sep + styleDim.Render("enter answer")
+		hint = styleDim.Render("ctrl+c cancel") + dot + styleDim.Render("enter answer")
 	case chatPlanReview:
-		hint = styleDim.Render("ctrl+c cancel") + sep + styleDim.Render("\"go\" approve") + sep + styleDim.Render("\"skip\" skip")
+		hint = styleDim.Render("ctrl+c cancel") + dot + styleDim.Render("\"go\" approve") + dot + styleDim.Render("\"skip\" skip")
 	default:
-		hint = styleDim.Render("ctrl+c quit") + sep + styleDim.Render("/help commands") + sep + styleDim.Render("↑↓ scroll")
+		hint = styleDim.Render("ctrl+c quit") + dot + styleDim.Render("/help") + dot + styleDim.Render("↑↓ scroll")
 	}
 	inputGap := m.width - lipgloss.Width(inputLine) - lipgloss.Width(hint) - 2
 	if inputGap < 1 {
@@ -1233,7 +1269,92 @@ func (m chatModel) View() string {
 	}
 	inputRow := inputLine + strings.Repeat(" ", inputGap) + hint
 
-	return framedBody + "\n" + suggestBar + inputRow
+	// ── Compose ──────────────────────────────────────────────
+	var out strings.Builder
+	out.WriteString(header + "\n")
+	out.WriteString(topSep + "\n")
+	out.WriteString(body + "\n")
+	if taskPanel != "" {
+		out.WriteString(taskPanel + "\n")
+	}
+	if notifyBar != "" {
+		out.WriteString(notifyBar) // already includes trailing \n per line
+	}
+	if activeToolLine != "" {
+		out.WriteString(activeToolLine + "\n")
+	}
+	out.WriteString(bottomSep + "\n")
+	if permPicker != "" {
+		out.WriteString(permPicker + "\n")
+	}
+	if suggestBar != "" {
+		out.WriteString(suggestBar + "\n")
+	}
+	out.WriteString(inputRow)
+
+	return out.String()
+}
+
+// ── Permission picker ─────────────────────────────────────────
+
+// renderPermissionPicker builds a clean inline permission selector (2 lines).
+func (m *chatModel) renderPermissionPicker() string {
+	type permOption struct {
+		label string
+		desc  string
+	}
+	options := []permOption{
+		{"Allow", "Allow this action once"},
+		{"Deny", "Block this action"},
+		{"Always", "Auto-approve this tool for the session"},
+		{"Trust all", "Auto-approve all tools for the session"},
+	}
+
+	var optParts []string
+	for i, opt := range options {
+		if i == m.permChoice {
+			optParts = append(optParts, lipgloss.NewStyle().Foreground(colAccent).Bold(true).Render("▸ "+opt.label))
+		} else {
+			optParts = append(optParts, styleDim.Render("  "+opt.label))
+		}
+	}
+	optLine := " " + strings.Join(optParts, "   ")
+	descLine := "  " + styleMuted.Render(options[m.permChoice].desc)
+
+	return optLine + "\n" + descLine
+}
+
+// ── Active tool status line ──────────────────────────────────
+
+// renderActiveToolLine builds a compact one-line status pinned above the bottom separator.
+func (m *chatModel) renderActiveToolLine() string {
+	// Find last pending tool — show tool name + detail
+	for i := len(m.segments) - 1; i >= 0; i-- {
+		if m.segments[i].kind == "tool" && m.segments[i].tool.state == "pending" {
+			t := m.segments[i].tool
+			detail := ""
+			if t.args != nil {
+				if p, ok := t.args["path"].(string); ok {
+					detail = p
+				} else if p, ok := t.args["command"].(string); ok {
+					if len(p) > 60 {
+						p = p[:57] + "..."
+					}
+					detail = p
+				} else if p, ok := t.args["pattern"].(string); ok {
+					detail = p
+				}
+			}
+			line := " " + m.spinner.View() + " " + styleToolName.Render(t.name)
+			if detail != "" {
+				line += " " + styleFilePath.Render(detail)
+			}
+			return line
+		}
+	}
+	// No pending tool — show current activity (thinking, narration, task status)
+	activity := m.currentToolActivity()
+	return " " + m.spinner.View() + " " + styleMuted.Render(activity)
 }
 
 // stripThinkTags removes <think>...</think> blocks and stray tags from text.
@@ -1305,67 +1426,38 @@ func (m *chatModel) taskPanelHeight() int {
 	if m.tasks == nil || m.tasks.Count() == 0 {
 		return 0
 	}
-	tasks := m.tasks.List()
-	lines := 1 // header line "Tasks:" or separator
-	for _, t := range tasks {
-		_ = t
-		lines++
-	}
-	return lines
+	return m.tasks.Count() // one line per task
 }
 
-// renderTaskPanel builds a compact task checklist shown below the header.
+// renderTaskPanel builds a compact task checklist pinned near the bottom.
 func (m *chatModel) renderTaskPanel() string {
 	if m.tasks == nil || m.tasks.Count() == 0 {
 		return ""
 	}
 	tasks := m.tasks.List()
-	pending, inProgress, completed := m.tasks.Stats()
-	total := pending + inProgress + completed
 
 	var sb strings.Builder
-
-	// Compact header with progress
-	progressText := styleDim.Render(fmt.Sprintf("  Tasks %d/%d", completed, total))
-	sb.WriteString(progressText)
-
-	// Progress bar
-	barWidth := 20
-	if m.width < 60 {
-		barWidth = 10
-	}
-	filled := 0
-	if total > 0 {
-		filled = completed * barWidth / total
-	}
-	bar := styleDim.Render(" [") +
-		styleOK.Render(strings.Repeat("█", filled)) +
-		styleDim.Render(strings.Repeat("░", barWidth-filled)) +
-		styleDim.Render("]")
-	sb.WriteString(bar + "\n")
-
-	// Task list — compact, one line each
 	for _, t := range tasks {
 		var icon string
 		var textStyle lipgloss.Style
 		switch t.Status {
 		case TaskCompleted:
-			icon = styleOK.Render("  ✓")
-			textStyle = styleDim
+			icon = styleOK.Render(" ✓")
+			textStyle = lipgloss.NewStyle().Foreground(colDim).Strikethrough(true)
 		case TaskInProgress:
-			icon = "  " + m.spinner.View()
-			textStyle = lipgloss.NewStyle().Foreground(colCyan)
+			icon = " " + m.spinner.View()
+			textStyle = lipgloss.NewStyle().Foreground(colText)
 		default:
 			if m.tasks.IsBlocked(t) {
-				icon = styleDim.Render("  ⊘")
+				icon = styleDim.Render(" ○")
 				textStyle = styleDim
 			} else {
-				icon = styleDim.Render("  ○")
+				icon = styleDim.Render(" ○")
 				textStyle = styleMuted
 			}
 		}
 		subject := t.Subject
-		maxSubject := m.width - 12
+		maxSubject := m.width - 8
 		if maxSubject < 20 {
 			maxSubject = 20
 		}
