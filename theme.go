@@ -72,6 +72,26 @@ func themeLight() Theme {
 	}
 }
 
+func themeRetro() Theme {
+	return Theme{
+		Name:      "retro",
+		Bg:        "#1a1a2e",
+		Surface:   "#16213e",
+		Border:    "#3a3f6b",
+		BorderHi:  "#7b68ee",
+		Text:      "#e8e6e3",
+		Secondary: "#8b8fa3",
+		Dim:       "#5c5f77",
+		Accent:    "#7b68ee",
+		Success:   "#50fa7b",
+		Warning:   "#f1fa8c",
+		Error:     "#ff5555",
+		Purple:    "#bd93f9",
+		Orange:    "#ffb86c",
+		Cyan:      "#8be9fd",
+	}
+}
+
 // activeTheme is the current color palette.
 var activeTheme = themeDark()
 
@@ -140,6 +160,8 @@ func initTheme() {
 	switch name {
 	case "light":
 		activeTheme = themeLight()
+	case "retro":
+		activeTheme = themeRetro()
 	default:
 		activeTheme = themeDark()
 	}
@@ -151,6 +173,8 @@ func setTheme(name string) {
 	switch strings.ToLower(name) {
 	case "light":
 		activeTheme = themeLight()
+	case "retro":
+		activeTheme = themeRetro()
 	default:
 		activeTheme = themeDark()
 	}

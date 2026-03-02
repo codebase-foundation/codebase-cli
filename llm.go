@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -136,7 +137,7 @@ func newLLMClientWithTimeout(apiKey, baseURL, model string, timeout time.Duratio
 // StreamChat sends a streaming Chat Completions request and pushes
 // parsed events into the provided channel. Caller should read from ch
 // until it is closed.
-func (c *LLMClient) StreamChat(messages []ChatMessage, tools []ToolDef, ch chan<- StreamEvent) {
+func (c *LLMClient) StreamChat(ctx context.Context, messages []ChatMessage, tools []ToolDef, ch chan<- StreamEvent) {
 	defer close(ch)
 
 	body := map[string]interface{}{
@@ -163,7 +164,7 @@ func (c *LLMClient) StreamChat(messages []ChatMessage, tools []ToolDef, ch chan<
 	var resp *http.Response
 	maxRetries := 3
 	for attempt := 0; attempt <= maxRetries; attempt++ {
-		req, err := http.NewRequest("POST", c.BaseURL+"/chat/completions", bytes.NewReader(jsonBody))
+		req, err := http.NewRequestWithContext(ctx, "POST", c.BaseURL+"/chat/completions", bytes.NewReader(jsonBody))
 		if err != nil {
 			ch <- StreamEvent{Type: StreamError, Error: fmt.Errorf("request: %w", err)}
 			return

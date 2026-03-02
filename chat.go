@@ -69,6 +69,7 @@ type chatModel struct {
 
 	// Permission
 	permRequest *PermissionRequest // current pending permission prompt
+	permCount   int                // how many permission prompts shown this session
 
 	// Glue + notifications
 	glue          *GlueClient
@@ -80,6 +81,16 @@ type chatModel struct {
 
 	// Planning
 	planState *PlanState
+
+	// Status narration
+	lastNarrationText string // last narration from glue for status bar
+
+	// Cleanup
+	chimePlayer *AudioPlayer   // active chime for cleanup on exit
+	agentDone   chan struct{}   // closed when agent goroutine returns
+
+	// Task tracking
+	tasks *TaskStore
 }
 
 // Messages
@@ -116,9 +127,16 @@ func newChatModel(cfg *Config) chatModel {
 	ti.PlaceholderStyle = lipgloss.NewStyle().Foreground(colDim)
 
 	s := spinner.New()
-	s.Spinner = spinner.Spinner{
-		Frames: []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"},
-		FPS:    80 * time.Millisecond,
+	if activeTheme.Name == "retro" {
+		s.Spinner = spinner.Spinner{
+			Frames: []string{"▖", "▘", "▝", "▗", "▚", "▞", "█", "▒", "░", "▒"},
+			FPS:    100 * time.Millisecond,
+		}
+	} else {
+		s.Spinner = spinner.Spinner{
+			Frames: []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"},
+			FPS:    80 * time.Millisecond,
+		}
 	}
 	s.Style = lipgloss.NewStyle().Foreground(colAccent)
 
@@ -136,6 +154,7 @@ func newChatModel(cfg *Config) chatModel {
 		streaming: &strings.Builder{},
 		glue:      NewGlueClient(cfg),
 		notify:    newNotifyManager(),
+		tasks:     NewTaskStore(),
 	}
 }
 
@@ -171,12 +190,17 @@ func (m chatModel) Init() tea.Cmd {
 
 func (m chatModel) waitForEvent() tea.Cmd {
 	ch := m.eventCh
+	stop := m.stopCh
 	return func() tea.Msg {
-		evt, ok := <-ch
-		if !ok {
-			return agentEventMsg{Type: EventDone, Text: ""}
+		select {
+		case evt, ok := <-ch:
+			if !ok {
+				return agentEventMsg{Type: EventDone, Text: ""}
+			}
+			return agentEventMsg(evt)
+		case <-stop:
+			return agentEventMsg{Type: EventDone, Text: "Stopped."}
 		}
-		return agentEventMsg(evt)
 	}
 }
 
@@ -210,7 +234,10 @@ func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 			if m.state == chatPermission {
 				// Deny the pending permission and return to streaming
 				if m.agent != nil {
-					m.agent.permCh <- PermissionResponse{Allowed: false}
+					select {
+					case m.agent.permCh <- PermissionResponse{Allowed: false}:
+					default:
+					}
 				}
 				m.permRequest = nil
 				m.state = chatStreaming
@@ -233,39 +260,36 @@ func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 				m.rebuildViewport()
 				return m, nil
 			}
+			// Clean up audio before quitting
+			if m.chimePlayer != nil {
+				m.chimePlayer.Stop()
+			}
 			return m, tea.Quit
+
+		// Permission single-key shortcuts — respond instantly without enter
+		case "y", "n", "a":
+			if m.state == chatPermission {
+				m.input.SetValue("")
+				return m.handlePermissionResponse(msg.String()), m.waitForEvent()
+			}
 
 		case "enter":
 			prompt := strings.TrimSpace(m.input.Value())
+			m.input.SetValue("")
+
+			// Permission: enter with empty input = allow
+			if m.state == chatPermission {
+				if prompt == "" {
+					prompt = "y"
+				}
+				return m.handlePermissionResponse(prompt), m.waitForEvent()
+			}
+
 			if prompt == "" {
 				return m, nil
 			}
-			m.input.SetValue("")
 
 			switch m.state {
-			case chatPermission:
-				resp := parsePermissionInput(prompt)
-				if m.agent != nil {
-					m.agent.permCh <- resp
-				}
-				// Show what user decided
-				decision := styleOK.Render("  ✓ allowed")
-				if !resp.Allowed {
-					decision = styleWarn.Render("  ✗ denied")
-				} else if resp.TrustLevel == PermTrustTool {
-					decision = styleOK.Render("  ✓ allowed (always for this tool)")
-				} else if resp.TrustLevel == PermTrustAll {
-					decision = styleOK.Render("  ✓ allowed (trusting all)")
-				}
-				m.segments = append(m.segments, segment{
-					kind: "text",
-					text: decision + "\n",
-				})
-				m.permRequest = nil
-				m.state = chatStreaming
-				m.input.Placeholder = "describe what you want to build..."
-				m.rebuildViewport()
-				return m, m.waitForEvent()
 
 			case chatPlanning:
 				// User answering a planning question
@@ -449,6 +473,7 @@ func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 
 		case "narrate":
 			if msg.text != "" {
+				m.lastNarrationText = msg.text
 				m.notify.Push(Notification{
 					Type: NotifyProgress,
 					Text: msg.text,
@@ -470,7 +495,7 @@ func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 
 	case narrateTickMsg:
 		if m.state == chatStreaming && len(m.recentActions) > 0 &&
-			time.Since(m.lastNarration) > 12*time.Second {
+			time.Since(m.lastNarration) > 6*time.Second {
 			m.lastNarration = time.Now()
 			actions := make([]string, len(m.recentActions))
 			copy(actions, m.recentActions)
@@ -517,7 +542,7 @@ func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 		}
 	}
 
-	if m.state == chatIdle || m.state == chatPlanning || m.state == chatPlanReview {
+	if m.state == chatIdle || m.state == chatPlanning || m.state == chatPlanReview || m.state == chatPermission {
 		var cmd tea.Cmd
 		m.input, cmd = m.input.Update(msg)
 		cmds = append(cmds, cmd)
@@ -557,9 +582,10 @@ func (m *chatModel) rebuildViewport() {
 	if !m.ready {
 		return
 	}
-	// Adjust viewport height for notifications
+	// Adjust viewport height for notifications + task panel
 	notifyH := len(m.notify.active)
-	targetH := m.height - 5 - notifyH
+	taskH := m.taskPanelHeight()
+	targetH := m.height - 5 - notifyH - taskH
 	if targetH < 5 {
 		targetH = 5
 	}
@@ -573,7 +599,7 @@ func (m *chatModel) rebuildViewport() {
 	for _, seg := range m.segments {
 		switch seg.kind {
 		case "tool":
-			block := renderToolBlock(seg.tool.name, seg.tool.args, seg.tool.output, seg.tool.state, contentW)
+			block := renderToolBlock(seg.tool.name, seg.tool.args, seg.tool.output, seg.tool.state, contentW, m.config.WorkDir)
 			// If pending, swap the static spinner with animated one
 			if seg.tool.state == "pending" {
 				block = strings.Replace(block, "⣾", m.spinner.View(), 1)
@@ -625,7 +651,7 @@ func (m *chatModel) startAgent(prompt string) {
 	// Reuse existing agent for conversation continuity, or create new one
 	if m.agent == nil {
 		client := NewLLMClient(m.config.APIKey, m.config.BaseURL, m.config.Model)
-		m.agent = NewAgent(client, m.config.WorkDir, m.eventCh, m.stopCh)
+		m.agent = NewAgent(client, m.config.WorkDir, m.eventCh, m.stopCh, m.tasks)
 
 		// Only restore session if --resume flag was passed
 		if m.config.Resume {
@@ -646,9 +672,11 @@ func (m *chatModel) startAgent(prompt string) {
 		m.agent.stopCh = m.stopCh
 	}
 
+	m.agentDone = make(chan struct{})
 	go func() {
 		m.agent.Run(prompt)
 		close(m.eventCh)
+		close(m.agentDone)
 	}()
 }
 
@@ -714,7 +742,7 @@ func (m *chatModel) handlePlanAnswer(input string) tea.Cmd {
 		m.startAgent(original)
 		return tea.Batch(
 			m.waitForEvent(),
-			tea.Tick(10*time.Second, func(t time.Time) tea.Msg { return narrateTickMsg{} }),
+			tea.Tick(3*time.Second, func(t time.Time) tea.Msg { return narrateTickMsg{} }),
 		)
 	}
 
@@ -765,7 +793,7 @@ func (m *chatModel) handlePlanReview(input string) tea.Cmd {
 		m.startAgent(enrichedPrompt)
 		return tea.Batch(
 			m.waitForEvent(),
-			tea.Tick(10*time.Second, func(t time.Time) tea.Msg { return narrateTickMsg{} }),
+			tea.Tick(3*time.Second, func(t time.Time) tea.Msg { return narrateTickMsg{} }),
 		)
 	}
 
@@ -782,7 +810,7 @@ func (m *chatModel) handlePlanReview(input string) tea.Cmd {
 		m.startAgent(original)
 		return tea.Batch(
 			m.waitForEvent(),
-			tea.Tick(10*time.Second, func(t time.Time) tea.Msg { return narrateTickMsg{} }),
+			tea.Tick(3*time.Second, func(t time.Time) tea.Msg { return narrateTickMsg{} }),
 		)
 	}
 
@@ -850,9 +878,14 @@ func (m *chatModel) handleAgentEvent(evt AgentEvent) tea.Cmd {
 		m.turns = evt.Turn
 		if evt.Turn > 1 {
 			m.flushStreamingText()
+			dividerText := "continuing..."
+			if m.lastNarrationText != "" {
+				dividerText = m.lastNarrationText
+			}
+			line := "─── " + dividerText + " ───"
 			m.segments = append(m.segments, segment{
 				kind: "divider",
-				text: "\n" + styleDim.Render(fmt.Sprintf("  ─── turn %d ───", evt.Turn)) + "\n\n",
+				text: "\n" + styleDim.Render("  "+line) + "\n\n",
 			})
 			m.rebuildViewport()
 		}
@@ -927,6 +960,18 @@ func (m *chatModel) handleAgentEvent(evt AgentEvent) tea.Cmd {
 			}
 		}
 		m.rebuildViewport()
+
+		// Trigger narration every 3 tool completions for responsive feedback
+		if m.toolsDone%3 == 0 && len(m.recentActions) > 0 {
+			m.lastNarration = time.Now()
+			actions := make([]string, len(m.recentActions))
+			copy(actions, m.recentActions)
+			glue := m.glue
+			return tea.Batch(m.waitForEvent(), func() tea.Msg {
+				narration := glue.Narrate(actions)
+				return glueResultMsg{kind: "narrate", text: narration}
+			})
+		}
 		return m.waitForEvent()
 
 	case EventUsage:
@@ -947,7 +992,7 @@ func (m *chatModel) handleAgentEvent(evt AgentEvent) tea.Cmd {
 		m.state = chatDoneFlash
 		m.flashFrames = 6
 		m.rebuildViewport()
-		go PlayChime()
+		m.chimePlayer = PlayChimeAsync()
 
 		// Glue: celebration + follow-up suggestions (in background)
 		summary := evt.Text
@@ -973,14 +1018,23 @@ func (m *chatModel) handleAgentEvent(evt AgentEvent) tea.Cmd {
 		m.flushStreamingText()
 		m.state = chatPermission
 		m.permRequest = evt.Permission
-		// Render the permission prompt
+		// Render compact permission block
 		summary := evt.Permission.Summary
+		permBlock := lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(colOrange).
+			Padding(0, 1).
+			Width(min(lipgloss.Width(summary)+14, m.width-8)).
+			Render(styleWarn.Render("⚡ ") + styleMuted.Render(summary))
 		m.segments = append(m.segments, segment{
 			kind: "text",
-			text: "\n" + styleWarn.Render("  ⚡ Permission required: ") + styleMuted.Render(summary) + "\n" +
-				styleDim.Render("  y/n/a (yes, no, always for this tool): "),
+			text: "\n  " + permBlock + "\n",
 		})
-		m.input.Placeholder = "y/n/a..."
+		m.input.Placeholder = "enter to allow, n to deny, a to always allow..."
+		m.permCount++
+		if m.permCount == 1 {
+			m.notify.Push(Notification{Type: NotifyInfo, Text: "Tip: /trust all to auto-approve this session", Duration: 8 * time.Second})
+		}
 		m.rebuildViewport()
 		return m.waitForEvent() // keep listening for other events while waiting
 
@@ -1041,12 +1095,8 @@ func (m chatModel) View() string {
 	statusParts := []string{modelStr, tokenStr, fileStr}
 	switch m.state {
 	case chatStreaming:
-		if m.toolsPending > 0 {
-			total := m.toolsDone + m.toolsPending
-			statusParts = append(statusParts, m.spinner.View()+styleMuted.Render(fmt.Sprintf(" tools %d/%d", m.toolsDone, total)))
-		} else {
-			statusParts = append(statusParts, m.spinner.View()+styleMuted.Render(" working"))
-		}
+		activity := m.currentToolActivity()
+		statusParts = append(statusParts, m.spinner.View()+" "+styleMuted.Render(activity))
 	case chatPermission:
 		statusParts = append(statusParts, styleWarn.Render("⚡ permission"))
 	case chatPlanning:
@@ -1081,6 +1131,9 @@ func (m chatModel) View() string {
 		gap = 1
 	}
 	header := titleLeft + strings.Repeat(" ", gap) + statusRight
+
+	// ── Task panel ──────────────────────────────────────────
+	taskPanel := m.renderTaskPanel()
 
 	// ── Notifications ────────────────────────────────────────
 	notifyBar := m.notify.Render(m.width)
@@ -1122,12 +1175,34 @@ func (m chatModel) View() string {
 		frame = styleFrame.Width(m.width - 2)
 	}
 
-	var innerContent string
-	if notifyBar != "" {
-		innerContent = header + "\n" + notifyBar + scrollIndicator + body
-	} else {
-		innerContent = header + "\n" + scrollIndicator + body
+	// Scanline sweep during completion flash
+	if m.state == chatDoneFlash && m.flashFrames > 0 {
+		bodyLines := strings.Split(body, "\n")
+		totalLines := len(bodyLines)
+		if totalLines > 0 {
+			// Sweep from bottom to top
+			scanY := totalLines - (m.flashFrames * totalLines / 6)
+			if scanY >= 0 && scanY < totalLines {
+				scanColor := flashCycleColors[len(flashCycleColors)-m.flashFrames]
+				bodyLines[scanY] = lipgloss.NewStyle().
+					Background(scanColor).
+					Foreground(lipgloss.Color("#000000")).
+					Width(m.width - 6).
+					Render(bodyLines[scanY])
+			}
+			body = strings.Join(bodyLines, "\n")
+		}
 	}
+
+	var innerContent string
+	parts := []string{header}
+	if taskPanel != "" {
+		parts = append(parts, taskPanel)
+	}
+	if notifyBar != "" {
+		parts = append(parts, notifyBar)
+	}
+	innerContent = strings.Join(parts, "\n") + "\n" + scrollIndicator + body
 	framedBody := frame.Render(innerContent)
 
 	// ── Suggestions ──────────────────────────────────────────
@@ -1137,14 +1212,14 @@ func (m chatModel) View() string {
 	}
 
 	// ── Input ────────────────────────────────────────────────
-	inputLine := " " + m.input.View()
+	inputLine := OSC633PromptStart() + " " + m.input.View() + OSC633PromptEnd()
 	sep := styleDim.Render(" · ")
 	var hint string
 	switch m.state {
 	case chatStreaming:
 		hint = styleDim.Render("ctrl+c stop") + sep + styleDim.Render("↑↓ scroll")
 	case chatPermission:
-		hint = styleDim.Render("y allow") + sep + styleDim.Render("n deny") + sep + styleDim.Render("a always") + sep + styleDim.Render("ctrl+c deny")
+		hint = styleDim.Render("enter allow") + sep + styleDim.Render("n deny") + sep + styleDim.Render("a always") + sep + styleDim.Render("ctrl+c stop")
 	case chatPlanning:
 		hint = styleDim.Render("ctrl+c cancel") + sep + styleDim.Render("enter answer")
 	case chatPlanReview:
@@ -1191,5 +1266,217 @@ func parseSuggestionIndex(input string, count int) int {
 		return -1
 	}
 	return idx
+}
+
+// ── Permission response handler ──────────────────────────────
+
+func (m *chatModel) handlePermissionResponse(input string) chatModel {
+	resp := parsePermissionInput(input)
+	if m.agent != nil {
+		select {
+		case m.agent.permCh <- resp:
+		default:
+			// Channel full or closed — don't block
+		}
+	}
+	decision := styleOK.Render("  ✓ allowed")
+	if !resp.Allowed {
+		decision = styleWarn.Render("  ✗ denied")
+	} else if resp.TrustLevel == PermTrustTool {
+		decision = styleOK.Render("  ✓ always allow " + m.permRequest.Tool)
+	} else if resp.TrustLevel == PermTrustAll {
+		decision = styleOK.Render("  ✓ trusted all")
+	}
+	m.segments = append(m.segments, segment{
+		kind: "text",
+		text: decision + "\n",
+	})
+	m.permRequest = nil
+	m.state = chatStreaming
+	m.input.Placeholder = "describe what you want to build..."
+	m.rebuildViewport()
+	return *m
+}
+
+// ── Task panel rendering ─────────────────────────────────────
+
+// taskPanelHeight returns how many lines the task panel takes.
+func (m *chatModel) taskPanelHeight() int {
+	if m.tasks == nil || m.tasks.Count() == 0 {
+		return 0
+	}
+	tasks := m.tasks.List()
+	lines := 1 // header line "Tasks:" or separator
+	for _, t := range tasks {
+		_ = t
+		lines++
+	}
+	return lines
+}
+
+// renderTaskPanel builds a compact task checklist shown below the header.
+func (m *chatModel) renderTaskPanel() string {
+	if m.tasks == nil || m.tasks.Count() == 0 {
+		return ""
+	}
+	tasks := m.tasks.List()
+	pending, inProgress, completed := m.tasks.Stats()
+	total := pending + inProgress + completed
+
+	var sb strings.Builder
+
+	// Compact header with progress
+	progressText := styleDim.Render(fmt.Sprintf("  Tasks %d/%d", completed, total))
+	sb.WriteString(progressText)
+
+	// Progress bar
+	barWidth := 20
+	if m.width < 60 {
+		barWidth = 10
+	}
+	filled := 0
+	if total > 0 {
+		filled = completed * barWidth / total
+	}
+	bar := styleDim.Render(" [") +
+		styleOK.Render(strings.Repeat("█", filled)) +
+		styleDim.Render(strings.Repeat("░", barWidth-filled)) +
+		styleDim.Render("]")
+	sb.WriteString(bar + "\n")
+
+	// Task list — compact, one line each
+	for _, t := range tasks {
+		var icon string
+		var textStyle lipgloss.Style
+		switch t.Status {
+		case TaskCompleted:
+			icon = styleOK.Render("  ✓")
+			textStyle = styleDim
+		case TaskInProgress:
+			icon = "  " + m.spinner.View()
+			textStyle = lipgloss.NewStyle().Foreground(colCyan)
+		default:
+			if m.tasks.IsBlocked(t) {
+				icon = styleDim.Render("  ⊘")
+				textStyle = styleDim
+			} else {
+				icon = styleDim.Render("  ○")
+				textStyle = styleMuted
+			}
+		}
+		subject := t.Subject
+		maxSubject := m.width - 12
+		if maxSubject < 20 {
+			maxSubject = 20
+		}
+		runes := []rune(subject)
+		if len(runes) > maxSubject {
+			subject = string(runes[:maxSubject-3]) + "..."
+		}
+		sb.WriteString(icon + " " + textStyle.Render(subject) + "\n")
+	}
+
+	return strings.TrimRight(sb.String(), "\n")
+}
+
+// currentToolActivity returns human-readable text for the current tool action.
+func (m *chatModel) currentToolActivity() string {
+	// Check pending tools first
+	for i := len(m.segments) - 1; i >= 0; i-- {
+		if m.segments[i].kind == "tool" && m.segments[i].tool.state == "pending" {
+			return toolActivityText(m.segments[i].tool.name, m.segments[i].tool.args)
+		}
+	}
+	// Show active task's activeForm if available
+	if m.tasks != nil {
+		if active := m.tasks.ActiveTask(); active != nil && active.ActiveForm != "" {
+			return active.ActiveForm
+		}
+	}
+	if m.lastNarrationText != "" {
+		return m.lastNarrationText
+	}
+	return "thinking..."
+}
+
+// toolActivityText converts a tool name + args into natural language.
+func toolActivityText(name string, args map[string]any) string {
+	switch name {
+	case "read_file":
+		if p, ok := args["path"].(string); ok {
+			parts := strings.Split(p, "/")
+			return "reading " + parts[len(parts)-1]
+		}
+		return "reading file..."
+	case "write_file":
+		if p, ok := args["path"].(string); ok {
+			parts := strings.Split(p, "/")
+			return "writing " + parts[len(parts)-1]
+		}
+		return "writing file..."
+	case "edit_file", "multi_edit":
+		if p, ok := args["path"].(string); ok {
+			parts := strings.Split(p, "/")
+			return "editing " + parts[len(parts)-1]
+		}
+		return "editing..."
+	case "search_files":
+		if p, ok := args["pattern"].(string); ok {
+			return "searching for " + p
+		}
+		return "searching..."
+	case "list_files":
+		return "scanning files..."
+	case "shell":
+		if c, ok := args["command"].(string); ok {
+			fields := strings.Fields(c)
+			if len(fields) > 0 {
+				return "running " + fields[0]
+			}
+		}
+		return "running command..."
+	case "dispatch_agent":
+		return "researching..."
+	case "web_search":
+		if q, ok := args["query"].(string); ok {
+			if len(q) > 30 {
+				q = q[:27] + "..."
+			}
+			return "searching web: " + q
+		}
+		return "searching web..."
+	case "create_task":
+		if s, ok := args["subject"].(string); ok {
+			return "planning: " + s
+		}
+		return "planning..."
+	case "update_task":
+		return "updating task..."
+	case "list_tasks":
+		return "checking tasks..."
+	case "get_task":
+		return "reviewing task..."
+	case "git_status":
+		return "checking git status..."
+	case "git_diff":
+		return "viewing diff..."
+	case "git_log":
+		return "checking git history..."
+	case "git_commit":
+		if m, ok := args["message"].(string); ok {
+			if len(m) > 30 {
+				m = m[:27] + "..."
+			}
+			return "committing: " + m
+		}
+		return "committing..."
+	case "git_branch":
+		if n, ok := args["name"].(string); ok && n != "" {
+			return "switching to " + n
+		}
+		return "listing branches..."
+	default:
+		return name + "..."
+	}
 }
 

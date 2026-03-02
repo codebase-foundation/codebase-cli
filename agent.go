@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -72,9 +73,13 @@ Available tools:
 - git_log: Show recent commit history.
 - git_commit: Stage files and create a commit.
 - git_branch: List, create, or switch branches.
+- create_task: Create a task to track progress. The user sees these as a live checklist.
+- update_task: Update task status (pending → in_progress → completed).
+- list_tasks: List all tasks with status.
+- get_task: Get full details of a specific task.
 
 Guidelines:
-- You can call multiple tools in parallel — read_file, list_files, search_files, web_search, and dispatch_agent all run concurrently
+- You can call multiple tools in parallel — read_file, list_files, search_files, web_search, dispatch_agent, list_tasks, and get_task all run concurrently
 - Use list_files and search_files to explore the project before making changes
 - Read files before editing them — understand existing code first
 - Make targeted, minimal changes — don't rewrite entire files unnecessarily
@@ -82,7 +87,15 @@ Guidelines:
 - Use git tools instead of shell for git operations — they provide structured output
 - After you edit files, the system may report diagnostics (errors, warnings) from language tools. If diagnostics appear, fix the issues before moving on.
 - If a tool fails, read the error and try a different approach
-- When finished, briefly summarize what you changed and why`
+- When finished, briefly summarize what you changed and why
+
+Task management:
+- For multi-step work (3+ steps), create tasks upfront so the user can track progress
+- Set status to "in_progress" BEFORE starting work on a task
+- Set status to "completed" only when fully done — not when partially done
+- Keep task subjects short and imperative (e.g. "Add auth middleware")
+- Provide active_form in present continuous (e.g. "Adding auth middleware") — it shows in the spinner
+- For simple or single-step tasks, skip task creation — just do the work directly`
 
 type Agent struct {
 	client    *LLMClient
@@ -94,9 +107,10 @@ type Agent struct {
 	permCh    chan PermissionResponse
 	permState *PermissionState
 	diag      *DiagnosticsEngine
+	tasks     *TaskStore
 }
 
-func NewAgent(client *LLMClient, workDir string, events chan<- AgentEvent, stopCh <-chan struct{}) *Agent {
+func NewAgent(client *LLMClient, workDir string, events chan<- AgentEvent, stopCh <-chan struct{}, tasks *TaskStore) *Agent {
 	sysContent := buildSystemPrompt(workDir)
 	return &Agent{
 		client:  client,
@@ -109,6 +123,7 @@ func NewAgent(client *LLMClient, workDir string, events chan<- AgentEvent, stopC
 		permCh:    make(chan PermissionResponse, 1),
 		permState: &PermissionState{TrustedTools: map[string]bool{}},
 		diag:      NewDiagnosticsEngine(workDir),
+		tasks:     tasks,
 	}
 }
 
@@ -252,9 +267,17 @@ func (a *Agent) Run(prompt string) {
 
 		a.events <- AgentEvent{Type: EventTurnStart, Turn: turn}
 
-		// Stream LLM call
+		// Stream LLM call with context derived from stopCh
+		ctx, cancel := context.WithCancel(context.Background())
+		go func() {
+			select {
+			case <-a.stopCh:
+				cancel()
+			case <-ctx.Done():
+			}
+		}()
 		streamCh := make(chan StreamEvent, 64)
-		go a.client.StreamChat(a.history, toolDefs, streamCh)
+		go a.client.StreamChat(ctx, a.history, toolDefs, streamCh)
 
 		var textContent strings.Builder
 		var toolCalls []ToolCall
@@ -264,6 +287,7 @@ func (a *Agent) Run(prompt string) {
 			// Check stop between stream events
 			select {
 			case <-a.stopCh:
+				cancel()
 				a.events <- AgentEvent{Type: EventDone, Text: "Stopped by user."}
 				return
 			default:
@@ -285,6 +309,7 @@ func (a *Agent) Run(prompt string) {
 				}
 
 			case StreamError:
+				cancel()
 				a.events <- AgentEvent{Type: EventError, Error: fmt.Errorf("%s", humanizeError(evt.Error))}
 				a.events <- AgentEvent{Type: EventDone, Text: "Error occurred."}
 				return
@@ -293,6 +318,7 @@ func (a *Agent) Run(prompt string) {
 				// handled below
 			}
 		}
+		cancel() // ensure context goroutine exits
 
 		_ = lastUsage
 
@@ -375,7 +401,8 @@ func (a *Agent) executeToolCalls(toolCalls []ToolCall, consecutiveErrors *int) {
 				defer wg.Done()
 				var output string
 				var success bool
-				if tc.Function.Name == "dispatch_agent" {
+				switch tc.Function.Name {
+				case "dispatch_agent":
 					task := ""
 					if args != nil {
 						task, _ = args["task"].(string)
@@ -388,7 +415,11 @@ func (a *Agent) executeToolCalls(toolCalls []ToolCall, consecutiveErrors *int) {
 						output = res
 						success = true
 					}
-				} else {
+				case "list_tasks":
+					output, success = toolListTasks(args, a.tasks)
+				case "get_task":
+					output, success = toolGetTask(args, a.tasks)
+				default:
 					output, success = ExecuteTool(tc.Function.Name, tc.Function.Arguments, a.workDir)
 				}
 				results[idx] = result{tc: tc, args: args, output: output, success: success}
@@ -462,7 +493,8 @@ func (a *Agent) executeToolCalls(toolCalls []ToolCall, consecutiveErrors *int) {
 
 		var output string
 		var success bool
-		if tc.Function.Name == "dispatch_agent" {
+		switch tc.Function.Name {
+		case "dispatch_agent":
 			task := ""
 			if argsMap != nil {
 				task, _ = argsMap["task"].(string)
@@ -475,7 +507,15 @@ func (a *Agent) executeToolCalls(toolCalls []ToolCall, consecutiveErrors *int) {
 				output = res
 				success = true
 			}
-		} else {
+		case "create_task":
+			output, success = toolCreateTask(argsMap, a.tasks)
+		case "update_task":
+			output, success = toolUpdateTask(argsMap, a.tasks)
+		case "list_tasks":
+			output, success = toolListTasks(argsMap, a.tasks)
+		case "get_task":
+			output, success = toolGetTask(argsMap, a.tasks)
+		default:
 			output, success = ExecuteTool(tc.Function.Name, tc.Function.Arguments, a.workDir)
 		}
 

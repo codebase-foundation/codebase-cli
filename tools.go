@@ -244,6 +244,100 @@ var toolDefs = []ToolDef{
 	{
 		Type: "function",
 		Function: ToolDefFunction{
+			Name: "create_task",
+			Description: "Create a task to track progress on multi-step work. " +
+				"Use this when starting non-trivial work that involves 3+ steps. " +
+				"Each task should represent a clear, specific unit of work. " +
+				"Tasks are shown to the user as a progress checklist.",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"subject": map[string]interface{}{
+						"type":        "string",
+						"description": "Brief imperative title (e.g. \"Fix authentication bug\", \"Add unit tests\").",
+					},
+					"description": map[string]interface{}{
+						"type":        "string",
+						"description": "Detailed description of what needs to be done.",
+					},
+					"active_form": map[string]interface{}{
+						"type":        "string",
+						"description": "Present continuous form shown during progress (e.g. \"Fixing authentication bug\").",
+					},
+				},
+				"required": []string{"subject"},
+			},
+		},
+	},
+	{
+		Type: "function",
+		Function: ToolDefFunction{
+			Name: "update_task",
+			Description: "Update a task's status or details. " +
+				"Set status to \"in_progress\" when starting work, \"completed\" when done. " +
+				"IMPORTANT: Only mark a task completed when you have FULLY accomplished it.",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"task_id": map[string]interface{}{
+						"type":        "number",
+						"description": "The task ID to update.",
+					},
+					"status": map[string]interface{}{
+						"type":        "string",
+						"description": "New status: \"pending\", \"in_progress\", \"completed\", or \"deleted\".",
+						"enum":        []string{"pending", "in_progress", "completed", "deleted"},
+					},
+					"subject": map[string]interface{}{
+						"type":        "string",
+						"description": "Updated task title.",
+					},
+					"active_form": map[string]interface{}{
+						"type":        "string",
+						"description": "Updated present continuous form.",
+					},
+					"add_blocked_by": map[string]interface{}{
+						"type":        "array",
+						"description": "Task IDs that must complete before this task can start.",
+						"items":       map[string]interface{}{"type": "number"},
+					},
+				},
+				"required": []string{"task_id"},
+			},
+		},
+	},
+	{
+		Type: "function",
+		Function: ToolDefFunction{
+			Name: "list_tasks",
+			Description: "List all tasks with their current status. Use to check progress and find what to work on next.",
+			Parameters: map[string]interface{}{
+				"type":       "object",
+				"properties": map[string]interface{}{},
+				"required":   []string{},
+			},
+		},
+	},
+	{
+		Type: "function",
+		Function: ToolDefFunction{
+			Name: "get_task",
+			Description: "Get full details of a specific task including description and dependencies.",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"task_id": map[string]interface{}{
+						"type":        "number",
+						"description": "The task ID to retrieve.",
+					},
+				},
+				"required": []string{"task_id"},
+			},
+		},
+	},
+	{
+		Type: "function",
+		Function: ToolDefFunction{
 			Name: "shell",
 			Description: "Execute a shell command in the project directory. " +
 				"Use for: running builds, tests, installing packages, git commands, and any terminal task. " +
@@ -270,6 +364,8 @@ var parallelSafeTools = map[string]bool{
 	"search_files":   true,
 	"web_search":     true,
 	"dispatch_agent": true,
+	"list_tasks":     true,
+	"get_task":       true,
 }
 
 // IsParallelSafe returns whether a tool can run concurrently with other tools.

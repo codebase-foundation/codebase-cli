@@ -433,19 +433,21 @@ var chimePattern = []patternRow{
 	{"G-5", "C-5", "---", "---"},
 }
 
-// PlayChime plays a short success chime (~0.3 seconds).
-// Runs in the background. Respects CODEBASE_NOBOOT / CODEBASE_NOSOUND env vars.
-func PlayChime() {
+// PlayChimeAsync plays a short success chime (~0.3 seconds) in the background.
+// Returns the AudioPlayer so the caller can call Stop() for cleanup.
+// Returns nil if audio is disabled or unavailable.
+func PlayChimeAsync() *AudioPlayer {
 	if os.Getenv("CODEBASE_NOBOOT") != "" || os.Getenv("CODEBASE_NOSOUND") != "" {
-		return
+		return nil
 	}
 
 	player := tryChimePlayer()
 	if player == nil {
-		return
+		return nil
 	}
 
 	go func() {
+		defer close(player.done)
 		synth := &chipSynth{
 			pattern: chimePattern,
 			lead:    channel{envDecay: 0.9995},
@@ -477,6 +479,8 @@ func PlayChime() {
 		player.writer.Close()
 		player.cmd.Wait()
 	}()
+
+	return player
 }
 
 // tryChimePlayer creates a raw PCM audio pipe for the chime.

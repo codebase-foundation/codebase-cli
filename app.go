@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -48,6 +49,7 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// Global key handling
 	if keyMsg, ok := msg.(tea.KeyMsg); ok {
 		if keyMsg.String() == "ctrl+c" && m.screen == screenBoot {
+			m.boot.audio.Stop()
 			return m, tea.Quit
 		}
 	}
@@ -92,4 +94,33 @@ func (m appModel) View() string {
 		return m.chat.View()
 	}
 	return ""
+}
+
+// Cleanup gracefully shuts down background goroutines and processes.
+// Called from main.go's defer chain before terminal restoration.
+func (m *appModel) Cleanup() {
+	// Stop boot audio if still playing
+	m.boot.audio.Stop()
+
+	// Signal agent to stop
+	if m.chat.stopCh != nil {
+		select {
+		case <-m.chat.stopCh:
+		default:
+			close(m.chat.stopCh)
+		}
+	}
+
+	// Wait briefly for agent goroutine to finish
+	if m.chat.agentDone != nil {
+		select {
+		case <-m.chat.agentDone:
+		case <-time.After(2 * time.Second):
+		}
+	}
+
+	// Stop chime audio
+	if m.chat.chimePlayer != nil {
+		m.chat.chimePlayer.Stop()
+	}
 }

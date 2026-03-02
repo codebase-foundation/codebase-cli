@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
@@ -13,7 +14,7 @@ import (
 
 // renderToolBlock builds a bordered tool execution block.
 // State: "pending" (spinner), "success" (✓), "error" (✗)
-func renderToolBlock(toolName string, args map[string]any, output string, state string, width int) string {
+func renderToolBlock(toolName string, args map[string]any, output string, state string, width int, workDir string) string {
 	innerW := width - 4 // border + padding
 	if innerW < 20 {
 		innerW = 20
@@ -40,7 +41,13 @@ func renderToolBlock(toolName string, args map[string]any, output string, state 
 	if args != nil {
 		if p, ok := args["path"]; ok {
 			if s, ok := p.(string); ok {
-				pathStr = " " + styleFilePath.Render(s)
+				display := styleFilePath.Render(s)
+				// Wrap in OSC 8 hyperlink if terminal supports it
+				absPath := s
+				if !filepath.IsAbs(s) && workDir != "" {
+					absPath = filepath.Join(workDir, s)
+				}
+				pathStr = " " + FileLink(absPath, display)
 			}
 		}
 		if toolName == "search_files" {
@@ -68,6 +75,13 @@ func renderToolBlock(toolName string, args map[string]any, output string, state 
 				}
 			}
 		}
+		if toolName == "create_task" || toolName == "update_task" {
+			if s, ok := args["subject"]; ok {
+				if str, ok := s.(string); ok {
+					pathStr = " " + styleFilePath.Render(str)
+				}
+			}
+		}
 	}
 
 	// Build body content
@@ -91,6 +105,8 @@ func renderToolBlock(toolName string, args map[string]any, output string, state 
 		body = renderShellResult(args, output, state, innerW)
 	case "git_status", "git_diff", "git_log", "git_commit", "git_branch":
 		body = renderGitResult(toolName, args, output, state, innerW)
+	case "create_task", "update_task", "list_tasks", "get_task":
+		body = renderTaskResult(toolName, args, output, state, innerW)
 	default:
 		if output != "" && state != "pending" {
 			body = truncateLines(output, 5, innerW)
@@ -363,6 +379,34 @@ func wrapText(s string, width int) string {
 		result.WriteString("\n")
 	}
 	return strings.TrimRight(result.String(), "\n")
+}
+
+// ── Task tool rendering ─────────────────────────────────────
+
+func renderTaskResult(toolName string, args map[string]any, output string, state string, width int) string {
+	if state == "pending" {
+		switch toolName {
+		case "create_task":
+			subject, _ := args["subject"].(string)
+			if subject != "" {
+				return styleMuted.Render(" " + subject)
+			}
+		case "update_task":
+			status, _ := args["status"].(string)
+			if status != "" {
+				return styleMuted.Render(" → " + status)
+			}
+		}
+		return ""
+	}
+	// For completed task operations, show compact summary
+	if output != "" {
+		lines := strings.Split(output, "\n")
+		if len(lines) > 0 {
+			return styleMuted.Render(" " + lines[0])
+		}
+	}
+	return ""
 }
 
 // ── Git tool rendering ──────────────────────────────────────

@@ -37,7 +37,7 @@ func TestBootStepAdvancement(t *testing.T) {
 	m := newBootModel(testBootConfig())
 	m, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 
-	for i := 0; i < 4; i++ {
+	for i := 0; i < len(m.steps); i++ {
 		m, _ = m.Update(bootTickMsg{})
 		if !m.steps[i].done {
 			t.Errorf("step %d not done after tick", i)

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -66,7 +67,7 @@ func RunSubagent(client *LLMClient, workDir, task string) (string, error) {
 
 		// Stream LLM call
 		streamCh := make(chan StreamEvent, 64)
-		go client.StreamChat(history, subagentToolDefs, streamCh)
+		go client.StreamChat(context.Background(), history, subagentToolDefs, streamCh)
 
 		var textContent strings.Builder
 		var toolCalls []ToolCall

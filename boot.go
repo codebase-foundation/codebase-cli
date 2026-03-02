@@ -195,19 +195,30 @@ func buildBootSteps(cfg *Config) []bootStep {
 		{label: "config", value: "loaded"},
 		{label: "provider", value: cfg.Model},
 		{label: "workspace", value: fmt.Sprintf("%s (%d files)", workDisplay, fileCount)},
+		{label: "terminal", value: TerminalName()},
 		{label: "status", value: "ready"},
 	}
 }
 
 // ── Bubble Tea ───────────────────────────────────────────────
 
+// demoFPS returns the frame interval for the boot animation.
+// Throttled in VS Code/Cursor to prevent PTY flooding that affects other terminals.
+func demoFPS() time.Duration {
+	if termInfo.IsVSCode || termInfo.IsCursor {
+		return 120 * time.Millisecond // ~8fps — gentle on VS Code's terminal handler
+	}
+	return 50 * time.Millisecond // ~20fps — full speed in standalone terminals
+}
+
 func (m bootModel) Init() tea.Cmd {
+	fps := demoFPS()
 	return tea.Batch(
 		func() tea.Msg {
 			// Start boot music in background (nil if no audio device)
 			return bootAudioMsg{player: StartBootMusic()}
 		},
-		tea.Tick(50*time.Millisecond, func(t time.Time) tea.Msg { return demoTickMsg(t) }),
+		tea.Tick(fps, func(t time.Time) tea.Msg { return demoTickMsg(t) }),
 		// First boot step after 4 seconds (drawn-out demo intro)
 		tea.Tick(4*time.Second, func(t time.Time) tea.Msg { return bootTickMsg{} }),
 	)
@@ -224,7 +235,7 @@ func (m bootModel) Update(msg tea.Msg) (bootModel, tea.Cmd) {
 
 	case demoTickMsg:
 		m.frame++
-		return m, tea.Tick(50*time.Millisecond, func(t time.Time) tea.Msg { return demoTickMsg(t) })
+		return m, tea.Tick(demoFPS(), func(t time.Time) tea.Msg { return demoTickMsg(t) })
 
 	case bootTickMsg:
 		if m.current < len(m.steps) {
@@ -522,7 +533,10 @@ func (m bootModel) renderLogo(px []rgb, w, h, ox, oy, scale int, t, reveal float
 				}
 			}
 
-			// Glow
+			// Glow (skip in VS Code to reduce ANSI output volume)
+			if termInfo.IsVSCode || termInfo.IsCursor {
+				continue
+			}
 			for dy := -glowR; dy <= scale+glowR; dy++ {
 				for dx := -glowR; dx <= scale+glowR; dx++ {
 					x := ox + lx*scale + dx

@@ -6,8 +6,10 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -218,17 +220,50 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Terminal safety: restore on any exit path (panic, signal, error)
+	defer restoreTerminal()
+	defer func() {
+		if r := recover(); r != nil {
+			restoreTerminal()
+			fmt.Fprintf(os.Stderr, "Fatal: %v\n", r)
+			os.Exit(1)
+		}
+	}()
+
 	// Clean up stale sessions in the background
 	go CleanStaleSessions()
 
+	app := newAppModel(cfg)
+	defer app.Cleanup()
+
 	p := tea.NewProgram(
-		newAppModel(cfg),
+		app,
 		tea.WithAltScreen(),
 		tea.WithMouseCellMotion(),
 	)
 
+	// Graceful signal handling — ensure terminal is restored on SIGINT/SIGTERM
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sigCh
+		p.Kill()
+	}()
+
+	exitCode := 0
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+		exitCode = 1
 	}
+	// Defers (Cleanup, restoreTerminal) run before os.Exit
+	os.Exit(exitCode)
+}
+
+// restoreTerminal resets the terminal to a sane state.
+// Called on exit, panic, or signal to prevent corruption.
+func restoreTerminal() {
+	os.Stdout.WriteString("\033[?1049l") // exit alt screen
+	os.Stdout.WriteString("\033[?25h")   // show cursor
+	os.Stdout.WriteString("\033[?1002l") // disable mouse tracking
+	os.Stdout.WriteString("\033[0m")     // reset attributes
 }

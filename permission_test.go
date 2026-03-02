@@ -128,8 +128,8 @@ func TestParsePermissionInput(t *testing.T) {
 		{"always", true, PermTrustTool},
 		{"all", true, PermTrustAll},
 		{"trust", true, PermTrustAll},
-		{"garbage", false, PermAsk},
-		{"", false, PermAsk},
+		{"garbage", true, PermAsk},
+		{"", true, PermAsk},
 	}
 	for _, tt := range tests {
 		resp := parsePermissionInput(tt.input)

@@ -158,7 +158,7 @@ func PermissionSummary(toolName string, args map[string]any) string {
 func parsePermissionInput(input string) PermissionResponse {
 	input = strings.ToLower(strings.TrimSpace(input))
 	switch input {
-	case "y", "yes":
+	case "", "y", "yes":
 		return PermissionResponse{Allowed: true, TrustLevel: PermAsk}
 	case "n", "no":
 		return PermissionResponse{Allowed: false, TrustLevel: PermAsk}
@@ -167,7 +167,7 @@ func parsePermissionInput(input string) PermissionResponse {
 	case "all", "trust":
 		return PermissionResponse{Allowed: true, TrustLevel: PermTrustAll}
 	default:
-		// Default to deny for safety
-		return PermissionResponse{Allowed: false, TrustLevel: PermAsk}
+		// Default to allow — user just pressed enter or typed something
+		return PermissionResponse{Allowed: true, TrustLevel: PermAsk}
 	}
 }

@@ -115,14 +115,31 @@ func init() {
 			var sb strings.Builder
 			sb.WriteString(styleMuted.Render("  Session info:") + "\n")
 			sb.WriteString(styleDim.Render("  Model:    ") + styleMuted.Render(m.config.Model) + "\n")
-			sb.WriteString(styleDim.Render("  Tokens:   ") + styleMuted.Render(fmt.Sprintf("%d", totalTokens)) + "\n")
+			// Token counts with cost estimate
+			tokenLine := fmt.Sprintf("%d (%d in + %d out)", totalTokens, m.tokens.PromptTokens, m.tokens.CompletionTokens)
+			cost := estimateCost(m.config.Model, m.tokens.PromptTokens, m.tokens.CompletionTokens)
+			if cost != "" {
+				tokenLine += " " + styleDim.Render("~"+cost)
+			}
+			sb.WriteString(styleDim.Render("  Tokens:   ") + styleMuted.Render(tokenLine) + "\n")
 			sb.WriteString(styleDim.Render("  Files:    ") + styleMuted.Render(fmt.Sprintf("%d modified", m.files)) + "\n")
 			sb.WriteString(styleDim.Render("  Turns:    ") + styleMuted.Render(fmt.Sprintf("%d", m.turns)) + "\n")
 			sb.WriteString(styleDim.Render("  History:  ") + styleMuted.Render(fmt.Sprintf("%d messages", histLen)) + "\n")
 			sb.WriteString(styleDim.Render("  WorkDir:  ") + styleMuted.Render(m.config.WorkDir) + "\n")
+			// Task stats
+			if m.tasks != nil && m.tasks.Count() > 0 {
+				p, ip, c := m.tasks.Stats()
+				sb.WriteString(styleDim.Render("  Tasks:    ") + styleMuted.Render(fmt.Sprintf("%d done, %d active, %d pending", c, ip, p)) + "\n")
+			}
 			if m.title != "" {
 				sb.WriteString(styleDim.Render("  Title:    ") + styleMuted.Render(m.title) + "\n")
 			}
+			// Trust level
+			trustLevel := "ask"
+			if m.agent != nil && m.agent.permState.Level == PermTrustAll {
+				trustLevel = "all (auto-approve)"
+			}
+			sb.WriteString(styleDim.Render("  Trust:    ") + styleMuted.Render(trustLevel) + "\n")
 			m.segments = append(m.segments, segment{kind: "text", text: sb.String()})
 			m.rebuildViewport()
 			return nil
@@ -157,20 +174,66 @@ func init() {
 		},
 	},
 	{
+		name:    "tasks",
+		aliases: []string{"todo"},
+		desc:    "Show task list",
+		handler: func(m *chatModel, args string) tea.Cmd {
+			if m.tasks == nil || m.tasks.Count() == 0 {
+				m.segments = append(m.segments, segment{
+					kind: "text",
+					text: styleMuted.Render("  No tasks yet — the agent creates tasks automatically for multi-step work.\n"),
+				})
+				m.rebuildViewport()
+				return nil
+			}
+
+			tasks := m.tasks.List()
+			pending, inProgress, completed := m.tasks.Stats()
+			total := pending + inProgress + completed
+
+			var sb strings.Builder
+			sb.WriteString(styleMuted.Render(fmt.Sprintf("  Tasks: %d/%d complete", completed, total)) + "\n\n")
+
+			for _, t := range tasks {
+				var icon, status string
+				switch t.Status {
+				case TaskCompleted:
+					icon = styleOK.Render("  ✓")
+					status = styleDim.Render(" done")
+				case TaskInProgress:
+					icon = styleAccentText.Render("  ◐")
+					status = styleAccentText.Render(" working")
+				default:
+					if m.tasks.IsBlocked(t) {
+						icon = styleDim.Render("  ⊘")
+						status = styleDim.Render(" blocked")
+					} else {
+						icon = styleDim.Render("  ○")
+						status = ""
+					}
+				}
+				sb.WriteString(icon + " " + styleMuted.Render(t.Subject) + status + "\n")
+			}
+			m.segments = append(m.segments, segment{kind: "text", text: sb.String()})
+			m.rebuildViewport()
+			return nil
+		},
+	},
+	{
 		name: "theme",
-		desc: "Switch color theme (usage: /theme dark|light)",
+		desc: "Switch color theme (usage: /theme dark|light|retro)",
 		handler: func(m *chatModel, args string) tea.Cmd {
 			if args == "" {
 				m.segments = append(m.segments, segment{
 					kind: "text",
 					text: styleMuted.Render("  Current theme: ") + styleAccentText.Render(activeTheme.Name) + "\n" +
-						styleMuted.Render("  Usage: /theme dark|light\n"),
+						styleMuted.Render("  Usage: /theme dark|light|retro\n"),
 				})
 				m.rebuildViewport()
 				return nil
 			}
 			switch strings.ToLower(args) {
-			case "dark", "light":
+			case "dark", "light", "retro":
 				setTheme(args)
 				m.segments = append(m.segments, segment{
 					kind: "text",
@@ -180,7 +243,7 @@ func init() {
 			default:
 				m.segments = append(m.segments, segment{
 					kind: "text",
-					text: styleWarn.Render("  Unknown theme: "+args) + styleMuted.Render(". Try: dark, light\n"),
+					text: styleWarn.Render("  Unknown theme: "+args) + styleMuted.Render(". Try: dark, light, retro\n"),
 				})
 				m.rebuildViewport()
 			}
@@ -281,6 +344,33 @@ func init() {
 		},
 	},
 	{
+		name: "diff",
+		desc: "Open file diff in VS Code/Cursor (usage: /diff <file>)",
+		handler: func(m *chatModel, args string) tea.Cmd {
+			if !termInfo.IsVSCode && !termInfo.IsCursor {
+				m.segments = append(m.segments, segment{
+					kind: "text",
+					text: styleWarn.Render("  /diff requires VS Code or Cursor terminal.\n"),
+				})
+				m.rebuildViewport()
+				return nil
+			}
+			if args == "" {
+				m.segments = append(m.segments, segment{
+					kind: "text",
+					text: styleMuted.Render("  Usage: /diff <file-path>\n"),
+				})
+				m.rebuildViewport()
+				return nil
+			}
+			// Open git diff for the file in VS Code
+			cmd := exec.Command("code", "--diff", args, args)
+			cmd.Start()
+			m.notify.Push(Notification{Type: NotifyInfo, Text: "Opening diff in editor..."})
+			return nil
+		},
+	},
+	{
 		name:    "quit",
 		aliases: []string{"exit", "q"},
 		desc:    "Exit codebase",
@@ -341,6 +431,56 @@ func cmdHelp(m *chatModel, args string) tea.Cmd {
 	m.segments = append(m.segments, segment{kind: "text", text: sb.String()})
 	m.rebuildViewport()
 	return nil
+}
+
+// ──────────────────────────────────────────────────────────────
+//  Cost estimation (rough per-1M-token rates)
+// ──────────────────────────────────────────────────────────────
+
+func estimateCost(model string, promptTokens, completionTokens int) string {
+	// Approximate costs per million tokens (input, output)
+	type pricing struct{ input, output float64 }
+	rates := map[string]pricing{
+		"gpt-4o":        {2.50, 10.0},
+		"gpt-4o-mini":   {0.15, 0.60},
+		"gpt-4-turbo":   {10.0, 30.0},
+		"gpt-4.1":       {2.00, 8.0},
+		"gpt-4.1-mini":  {0.40, 1.60},
+		"gpt-4.1-nano":  {0.10, 0.40},
+		"o3-mini":       {1.10, 4.40},
+		"claude-sonnet": {3.00, 15.0},
+		"claude-opus":   {15.0, 75.0},
+		"claude-haiku":  {0.25, 1.25},
+		"glm-4":         {0.14, 0.14},
+		"glm-4.7":       {0.14, 0.14},
+	}
+
+	// Try exact match, then prefix match
+	modelLower := strings.ToLower(model)
+	var rate pricing
+	found := false
+	if r, ok := rates[modelLower]; ok {
+		rate = r
+		found = true
+	}
+	if !found {
+		for prefix, r := range rates {
+			if strings.HasPrefix(modelLower, prefix) {
+				rate = r
+				found = true
+				break
+			}
+		}
+	}
+	if !found {
+		return ""
+	}
+
+	cost := (float64(promptTokens)/1_000_000)*rate.input + (float64(completionTokens)/1_000_000)*rate.output
+	if cost < 0.01 {
+		return fmt.Sprintf("$%.4f", cost)
+	}
+	return fmt.Sprintf("$%.2f", cost)
 }
 
 // ──────────────────────────────────────────────────────────────
