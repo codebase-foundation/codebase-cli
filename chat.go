@@ -621,7 +621,7 @@ func (m *chatModel) rebuildViewport() {
 	}
 	pickerH := 0
 	if m.state == chatPermission {
-		pickerH = 2
+		pickerH = 5 // context box (3) + options (1) + description (1)
 	}
 	suggestH := 0
 	if len(m.suggestions) > 0 && m.state == chatIdle {
@@ -1068,18 +1068,6 @@ func (m *chatModel) handleAgentEvent(evt AgentEvent) tea.Cmd {
 		m.state = chatPermission
 		m.permRequest = evt.Permission
 		m.permChoice = 0 // default to "Allow"
-		// Render compact permission context block (picker is rendered below viewport)
-		summary := evt.Permission.Summary
-		permBlock := lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(colOrange).
-			Padding(0, 1).
-			Width(min(lipgloss.Width(summary)+14, m.width-8)).
-			Render(styleWarn.Render("⚡ ") + styleMuted.Render(summary))
-		m.segments = append(m.segments, segment{
-			kind: "text",
-			text: "\n  " + permBlock + "\n",
-		})
 		m.input.Placeholder = ""
 		m.permCount++
 		if m.permCount == 1 {
@@ -1306,8 +1294,27 @@ func (m chatModel) View() string {
 
 // ── Permission picker ─────────────────────────────────────────
 
-// renderPermissionPicker builds a clean inline permission selector (2 lines).
+// renderPermissionPicker builds the permission context box + selector, pinned above input.
 func (m *chatModel) renderPermissionPicker() string {
+	var sb strings.Builder
+
+	// Context box — centered
+	if m.permRequest != nil {
+		summary := m.permRequest.Summary
+		box := lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(colOrange).
+			Padding(0, 1).
+			Render(styleWarn.Render("⚡ ") + styleMuted.Render(summary))
+		boxW := lipgloss.Width(box)
+		pad := (m.width - boxW) / 2
+		if pad < 0 {
+			pad = 0
+		}
+		sb.WriteString(strings.Repeat(" ", pad) + box + "\n")
+	}
+
+	// Option picker
 	type permOption struct {
 		label string
 		desc  string
@@ -1327,10 +1334,23 @@ func (m *chatModel) renderPermissionPicker() string {
 			optParts = append(optParts, styleDim.Render("  "+opt.label))
 		}
 	}
-	optLine := " " + strings.Join(optParts, "   ")
-	descLine := "  " + styleMuted.Render(options[m.permChoice].desc)
+	optLine := strings.Join(optParts, "   ")
+	optW := lipgloss.Width(optLine)
+	optPad := (m.width - optW) / 2
+	if optPad < 0 {
+		optPad = 0
+	}
+	sb.WriteString(strings.Repeat(" ", optPad) + optLine + "\n")
 
-	return optLine + "\n" + descLine
+	descText := styleMuted.Render(options[m.permChoice].desc)
+	descW := lipgloss.Width(descText)
+	descPad := (m.width - descW) / 2
+	if descPad < 0 {
+		descPad = 0
+	}
+	sb.WriteString(strings.Repeat(" ", descPad) + descText)
+
+	return sb.String()
 }
 
 // ── Active tool status line ──────────────────────────────────
