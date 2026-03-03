@@ -152,10 +152,11 @@ func (m setupModel) handleKey(msg tea.KeyMsg) (setupModel, tea.Cmd) {
 
 	switch m.step {
 	case stepProvider:
-		return m.handleArrowSelect(key, len(providers), &m.providerIdx, func() (setupModel, tea.Cmd) {
+		newIdx, entered := arrowSelect(key, len(providers), m.providerIdx)
+		m.providerIdx = newIdx
+		if entered {
 			p := providers[m.providerIdx]
 			if p.baseURL == "" {
-				// Custom URL
 				m.step = stepCustomURL
 				m.input.SetValue("")
 				m.input.Placeholder = "https://your-api.example.com/v1"
@@ -169,7 +170,8 @@ func (m setupModel) handleKey(msg tea.KeyMsg) (setupModel, tea.Cmd) {
 			m.input.EchoMode = textinput.EchoPassword
 			m.input.Focus()
 			return m, textinput.Blink
-		})
+		}
+		return m, nil
 
 	case stepCustomURL:
 		if key == "enter" {
@@ -259,13 +261,17 @@ func (m setupModel) handleKey(msg tea.KeyMsg) (setupModel, tea.Cmd) {
 			m.input, cmd = m.input.Update(msg)
 			return m, cmd
 		}
-		return m.handleArrowSelect(key, len(m.models), &m.modelIdx, func() (setupModel, tea.Cmd) {
+		newIdx, entered := arrowSelect(key, len(m.models), m.modelIdx)
+		m.modelIdx = newIdx
+		if entered {
 			m.step = stepGlueChoice
-			return m, nil
-		})
+		}
+		return m, nil
 
 	case stepGlueChoice:
-		return m.handleArrowSelect(key, len(glueChoices), &m.glueChoice, func() (setupModel, tea.Cmd) {
+		newIdx, entered := arrowSelect(key, len(glueChoices), m.glueChoice)
+		m.glueChoice = newIdx
+		if entered {
 			switch m.glueChoice {
 			case 0: // Same provider
 				m.glueBaseURL = m.baseURL
@@ -280,11 +286,13 @@ func (m setupModel) handleKey(msg tea.KeyMsg) (setupModel, tea.Cmd) {
 			case 2: // Skip
 				return m, m.saveAndFinish()
 			}
-			return m, nil
-		})
+		}
+		return m, nil
 
 	case stepGlueProvider:
-		return m.handleArrowSelect(key, len(providers), &m.glueProviderIdx, func() (setupModel, tea.Cmd) {
+		newIdx, entered := arrowSelect(key, len(providers), m.glueProviderIdx)
+		m.glueProviderIdx = newIdx
+		if entered {
 			p := providers[m.glueProviderIdx]
 			if p.baseURL == "" {
 				m.step = stepGlueCustomURL
@@ -300,7 +308,8 @@ func (m setupModel) handleKey(msg tea.KeyMsg) (setupModel, tea.Cmd) {
 			m.input.EchoMode = textinput.EchoPassword
 			m.input.Focus()
 			return m, textinput.Blink
-		})
+		}
+		return m, nil
 
 	case stepGlueCustomURL:
 		if key == "enter" {
@@ -375,10 +384,11 @@ func (m setupModel) handleKey(msg tea.KeyMsg) (setupModel, tea.Cmd) {
 			m.input, cmd = m.input.Update(msg)
 			return m, cmd
 		}
-		return m.handleArrowSelect(key, len(m.glueModels), &m.glueFastIdx, func() (setupModel, tea.Cmd) {
+		newIdx, entered := arrowSelect(key, len(m.glueModels), m.glueFastIdx)
+		m.glueFastIdx = newIdx
+		if entered {
 			m.step = stepGlueSmartModel
 			m.glueSmartIdx = 0
-			// Pre-select a smarter model if possible
 			for i, model := range m.glueModels {
 				lower := strings.ToLower(model)
 				if strings.Contains(lower, "70b") || strings.Contains(lower, "4o") ||
@@ -387,8 +397,8 @@ func (m setupModel) handleKey(msg tea.KeyMsg) (setupModel, tea.Cmd) {
 					break
 				}
 			}
-			return m, nil
-		})
+		}
+		return m, nil
 
 	case stepGlueSmartModel:
 		if m.manualEntry {
@@ -397,12 +407,9 @@ func (m setupModel) handleKey(msg tea.KeyMsg) (setupModel, tea.Cmd) {
 				if val == "" {
 					return m, nil
 				}
-				// Save: glueFast was already set, now set glueSmart
 				m.glueSmartIdx = 0
-				// We need to store the manual smart model separately
 				m.input.Blur()
 				m.manualEntry = false
-				// Build saved config with manual entries
 				sc := m.buildSavedConfig()
 				sc.GlueSmartModel = val
 				return m, func() tea.Msg { return setupDoneMsg{config: sc} }
@@ -411,36 +418,35 @@ func (m setupModel) handleKey(msg tea.KeyMsg) (setupModel, tea.Cmd) {
 			m.input, cmd = m.input.Update(msg)
 			return m, cmd
 		}
-		return m.handleArrowSelect(key, len(m.glueModels), &m.glueSmartIdx, func() (setupModel, tea.Cmd) {
+		newIdx, entered := arrowSelect(key, len(m.glueModels), m.glueSmartIdx)
+		m.glueSmartIdx = newIdx
+		if entered {
 			return m, m.saveAndFinish()
-		})
+		}
+		return m, nil
 	}
 
 	return m, nil
 }
 
-func (m setupModel) handleArrowSelect(key string, count int, idx *int, onEnter func() (setupModel, tea.Cmd)) (setupModel, tea.Cmd) {
+// arrowSelect handles arrow/vim key navigation. Returns the new index and
+// whether Enter was pressed. This is a free function (not a method) to avoid
+// the Go value-receiver copy bug where pointer modifications to a caller's
+// struct field are lost when the method returns its own stale copy of m.
+func arrowSelect(key string, count int, idx int) (int, bool) {
 	switch key {
-	case "up", "k":
-		if *idx > 0 {
-			*idx--
+	case "up", "k", "left", "h":
+		if idx > 0 {
+			idx--
 		}
-	case "down", "j":
-		if *idx < count-1 {
-			*idx++
-		}
-	case "left", "h":
-		if *idx > 0 {
-			*idx--
-		}
-	case "right", "l":
-		if *idx < count-1 {
-			*idx++
+	case "down", "j", "right", "l":
+		if idx < count-1 {
+			idx++
 		}
 	case "enter":
-		return onEnter()
+		return idx, true
 	}
-	return m, nil
+	return idx, false
 }
 
 func (m setupModel) handleModelsFetched(msg modelsFetchedMsg) (setupModel, tea.Cmd) {
