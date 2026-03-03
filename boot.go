@@ -80,14 +80,16 @@ func init() {
 		r := math.Sin(t*math.Pi*2)*0.5 + 0.5
 		g := math.Sin(t*math.Pi*2+2.094)*0.5 + 0.5
 		b := math.Sin(t*math.Pi*2+4.189)*0.5 + 0.5
+		// Desaturate: pull toward average
 		avg := (r + g + b) / 3.0
-		r = avg + (r-avg)*1.6
-		g = avg + (g-avg)*1.6
-		b = avg + (b-avg)*1.6
+		r = avg + (r-avg)*0.6
+		g = avg + (g-avg)*0.6
+		b = avg + (b-avg)*0.6
+		// Darker overall
 		plasmaPalette[i] = rgb{
-			clampU8(r * 200),
-			clampU8(g * 200),
-			clampU8(b * 200),
+			clampU8(r * 90),
+			clampU8(g * 90),
+			clampU8(b * 90),
 		}
 	}
 }
@@ -121,20 +123,17 @@ var glyphMap = map[rune][7]uint8{
 	' ': {0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00000},
 }
 
-// ── Scrolling text message ──────────────────────────────────
-
-const scrollMsg = "     welcome to codebase !     your local ai coding agent     built for the terminal     press enter to begin !     "
+// (scroller removed — keeping boot clean and minimal)
 
 // ── Boot model ───────────────────────────────────────────────
 
 // Demo phases (frame-based, at 20fps / 50ms per frame)
 const (
-	phPlasmaOnly   = 0   // frames 0-29:   just plasma + copper (1.5s)
-	phLogoAppear   = 30  // frames 30-69:  logo assembles pixel by pixel (2s)
-	phTextAppear   = 70  // frames 70-89:  "codebase" text types in (1s)
-	phCubeAppear   = 90  // frames 90-109: cube fades in (1s)
-	phScrollStart  = 60  // frames 60+:    scroller starts
-	phStepsStart   = 80  // frames 80+:    boot steps begin appearing
+	phPlasmaOnly   = 0   // frames 0-19:   just plasma (1s)
+	phLogoAppear   = 20  // frames 20-49:  logo assembles pixel by pixel (1.5s)
+	phTextAppear   = 50  // frames 50-64:  "codebase" text types in (0.75s)
+	phCubeAppear   = 55  // frames 55+:    cube fades in (1s)
+	phStepsStart   = 50  // frames 50+:    boot steps begin appearing
 )
 
 type bootModel struct {
@@ -220,8 +219,8 @@ func (m bootModel) Init() tea.Cmd {
 			return bootAudioMsg{player: StartBootMusic()}
 		},
 		tea.Tick(fps, func(t time.Time) tea.Msg { return demoTickMsg(t) }),
-		// First boot step after 4 seconds (drawn-out demo intro)
-		tea.Tick(4*time.Second, func(t time.Time) tea.Msg { return bootTickMsg{} }),
+		// First boot step after 2.5 seconds
+		tea.Tick(2500*time.Millisecond, func(t time.Time) tea.Msg { return bootTickMsg{} }),
 	)
 }
 
@@ -317,14 +316,8 @@ func (m bootModel) View() string {
 		cubeSize := float64(min(w, h)) * 0.14
 		cubeCX := float64(w) * 0.78
 		cubeCY := float64(h) * 0.35
-		// Grow from 0 to full size
 		growT := math.Min(1.0, float64(m.frame-phCubeAppear)/30.0)
 		m.renderCube(px, w, h, cubeCX, cubeCY, cubeSize*growT, t)
-	}
-
-	// ── Phase: Sine-wave scroller at the bottom ──────────────
-	if m.frame >= phScrollStart {
-		m.renderScroller(px, w, h, t)
 	}
 
 	// ── Phase: Boot steps ────────────────────────────────────
@@ -372,7 +365,7 @@ func (m bootModel) renderCopperBars(px []rgb, w, h int, t float64) {
 			dist := math.Abs(float64(py) - cy)
 			inten := math.Max(0, 1.0-dist/barWidth)
 			inten = inten * inten * inten
-			boost := inten * 140
+			boost := inten * 60 // subdued copper bars
 			for ppx := 0; ppx < w; ppx++ {
 				p := &px[py*w+ppx]
 				p.r = clampU8(float64(p.r) + boost*bar[2])
@@ -520,9 +513,12 @@ func (m bootModel) renderLogo(px []rgb, w, h, ox, oy, scale int, t, reveal float
 				continue
 			}
 
-			hue := float64(ly+lx)/float64(logoW+logoH) + t*0.35
-			hue -= math.Floor(hue)
-			cr, cg, cb := hslToRGB(hue, 0.9, 0.75)
+			// Cool white-blue logo
+			_ = t
+			blend := float64(ly) / float64(logoH)
+			cr := clampU8(200 + blend*55)
+			cg := clampU8(210 + blend*45)
+			cb := uint8(255)
 
 			for dy := 0; dy < scale; dy++ {
 				for dx := 0; dx < scale; dx++ {
@@ -577,9 +573,10 @@ func (m bootModel) renderBitmapText(px []rgb, w, h, ox, oy, scale int, text stri
 				if bits&(1<<(4-col)) == 0 {
 					continue
 				}
-				hue := float64(ci)/float64(max(1, len(text))) + t*0.25
-				hue -= math.Floor(hue)
-				cr, cg, cb := hslToRGB(hue, 0.65, 0.82)
+				// Soft white text
+				_ = t
+				_ = ci
+				cr, cg, cb := uint8(200), uint8(210), uint8(225)
 				for dy := 0; dy < scale; dy++ {
 					for dx := 0; dx < scale; dx++ {
 						x := gx + col*scale + dx
@@ -594,96 +591,7 @@ func (m bootModel) renderBitmapText(px []rgb, w, h, ox, oy, scale int, text stri
 	}
 }
 
-// ── Sine-wave scrolling text (classic Amiga scroller) ────────
-
-func (m bootModel) renderScroller(px []rgb, w, h int, t float64) {
-	scrollScale := max(1, min(h/30, w/60))
-	scrollH := 7 * scrollScale
-	baseY := h - scrollH - 4 // near bottom
-
-	// Horizontal scroll position (pixels)
-	glyphAdv := (5 + 2) * scrollScale
-	totalScrollW := len(scrollMsg) * glyphAdv
-	scrollOffset := (m.frame * 2) % totalScrollW
-
-	// Darken a band behind the scroller with gradient fade
-	fadeTop := baseY - scrollScale*4
-	fadeBot := baseY + scrollH + scrollScale*2
-	for py := fadeTop; py < fadeBot; py++ {
-		if py < 0 || py >= h {
-			continue
-		}
-		// Gradient: full darkness at center, fading at edges
-		centerY := float64(baseY + scrollH/2)
-		halfRange := float64(fadeBot-fadeTop) / 2.0
-		distFromCenter := math.Abs(float64(py) - centerY)
-		fade := math.Max(0, 1.0-distFromCenter/halfRange)
-		dim := 1.0 - fade*0.7
-		for ppx := 0; ppx < w; ppx++ {
-			p := &px[py*w+ppx]
-			p.r = uint8(float64(p.r) * dim)
-			p.g = uint8(float64(p.g) * dim)
-			p.b = uint8(float64(p.b) * dim)
-		}
-	}
-
-	// Rainbow separator line above scroller
-	sepY := fadeTop
-	if sepY >= 0 && sepY < h {
-		for ppx := 0; ppx < w; ppx++ {
-			hue := float64(ppx)/float64(w) + t*0.3
-			hue -= math.Floor(hue)
-			cr, cg, cb := hslToRGB(hue, 0.9, 0.55)
-			px[sepY*w+ppx] = rgb{cr, cg, cb}
-		}
-	}
-
-	// Render each visible character with sine-wave y displacement
-	for ci := 0; ci < len(scrollMsg); ci++ {
-		ch := rune(scrollMsg[ci])
-		glyph, ok := glyphMap[ch]
-		if !ok {
-			continue
-		}
-
-		charX := ci*glyphAdv - scrollOffset
-		// Wrap around
-		if charX < -glyphAdv {
-			charX += totalScrollW
-		}
-		if charX > w+glyphAdv {
-			continue
-		}
-
-		// Sine-wave vertical offset per character
-		sineAngle := float64(ci)*0.4 + t*3.0
-		sineOffset := math.Sin(sineAngle) * float64(scrollScale*3)
-		charY := baseY + int(sineOffset)
-
-		// Color: rainbow shift along scroll
-		hue := float64(ci)/float64(len(scrollMsg)) + t*0.15
-		hue -= math.Floor(hue)
-		cr, cg, cb := hslToRGB(hue, 0.95, 0.7)
-
-		for row := 0; row < 7; row++ {
-			bits := glyph[row]
-			for col := 0; col < 5; col++ {
-				if bits&(1<<(4-col)) == 0 {
-					continue
-				}
-				for dy := 0; dy < scrollScale; dy++ {
-					for dx := 0; dx < scrollScale; dx++ {
-						x := charX + col*scrollScale + dx
-						y := charY + row*scrollScale + dy
-						if x >= 0 && x < w && y >= 0 && y < h {
-							px[y*w+x] = rgb{cr, cg, cb}
-						}
-					}
-				}
-			}
-		}
-	}
-}
+// (scroller removed)
 
 // ── Boot info (overlaid on scroller area) ────────────────────
 
@@ -693,14 +601,10 @@ func (m bootModel) renderBootInfo(px []rgb, w, h int, t float64) {
 		return
 	}
 
-	// Position steps just above the scroller band
-	scrollScale := max(1, min(h/30, w/60))
-	scrollH := 7 * scrollScale
-	scrollBaseY := h - scrollH - 4
-
+	// Position steps near bottom of screen
 	stepLineH := 3
 	totalStepH := len(lines) * stepLineH
-	startY := scrollBaseY - scrollScale*5 - totalStepH
+	startY := h - totalStepH - 6
 
 	// Gentle gradient darken behind steps
 	gradTop := startY - 2

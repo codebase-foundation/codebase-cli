@@ -1,7 +1,7 @@
 #!/bin/sh
 set -e
 
-# Codebase CLI installer
+# Codebase CLI installer (Linux / macOS)
 # Usage: curl -sSL https://raw.githubusercontent.com/codebase-foundation/codebase-cli/main/install.sh | sh
 
 REPO="codebase-foundation/codebase-cli"
@@ -13,7 +13,7 @@ OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
 case "$OS" in
   linux)  OS="linux" ;;
   darwin) OS="darwin" ;;
-  *)      echo "Unsupported OS: $OS"; exit 1 ;;
+  *)      echo "Unsupported OS: $OS (use install.ps1 for Windows)"; exit 1 ;;
 esac
 
 # Detect architecture
@@ -56,14 +56,32 @@ chmod +x "${INSTALL_DIR}/${BINARY}"
 
 echo ""
 echo "Installed ${BINARY} ${TAG} to ${INSTALL_DIR}/${BINARY}"
+
+# Check if INSTALL_DIR is in PATH
+case ":${PATH}:" in
+  *":${INSTALL_DIR}:"*) ;;
+  *)
+    echo ""
+    echo "WARNING: ${INSTALL_DIR} is not in your PATH."
+    echo ""
+    SHELL_NAME="$(basename "${SHELL:-/bin/sh}")"
+    case "$SHELL_NAME" in
+      zsh)  RC="~/.zshrc" ;;
+      bash) RC="~/.bashrc" ;;
+      fish) RC="~/.config/fish/config.fish" ;;
+      *)    RC="your shell rc file" ;;
+    esac
+    if [ "$SHELL_NAME" = "fish" ]; then
+      echo "Add this to ${RC}:"
+      echo "  fish_add_path ${INSTALL_DIR}"
+    else
+      echo "Add this to ${RC}:"
+      echo "  export PATH=\"${INSTALL_DIR}:\$PATH\""
+    fi
+    echo ""
+    echo "Then restart your terminal or run: source ${RC}"
+    ;;
+esac
+
 echo ""
-echo "Quick start:"
-echo "  export OPENAI_API_KEY=sk-..."
-echo "  cd your-project"
-echo "  codebase"
-echo ""
-echo "Or use any OpenAI-compatible provider:"
-echo "  export OPENAI_BASE_URL=https://api.groq.com/openai/v1"
-echo "  export OPENAI_API_KEY=gsk-..."
-echo "  export OPENAI_MODEL=llama-3.3-70b-versatile"
-echo "  codebase"
+echo "Run 'codebase' in any project directory to get started."
