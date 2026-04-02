@@ -110,18 +110,20 @@ type StreamEvent struct {
 //  LLM Client
 // ──────────────────────────────────────────────────────────────
 
-// Protocol constants for API format detection
+// Protocol constants — these describe the wire format, not the provider.
+// Multiple providers can use the same protocol (e.g. MiniMax uses Messages API).
 const (
-	ProtocolOpenAI    = "openai"
-	ProtocolAnthropic = "anthropic"
+	ProtocolChatCompletions = "chat_completions" // OpenAI, Groq, Ollama, vLLM, etc.
+	ProtocolMessages        = "messages"         // Anthropic, MiniMax, etc.
 )
 
 type LLMClient struct {
-	APIKey   string
-	BaseURL  string
-	Model    string
-	Protocol string // "openai" or "anthropic"
-	client   *http.Client
+	APIKey        string
+	BaseURL       string
+	Model         string
+	Protocol      string // "chat_completions" or "messages"
+	UseCodebaseAI bool   // true = route through Codebase inference proxy
+	client        *http.Client
 }
 
 func NewLLMClient(apiKey, baseURL, model string) *LLMClient {
@@ -129,6 +131,22 @@ func NewLLMClient(apiKey, baseURL, model string) *LLMClient {
 }
 
 func newLLMClientWithTimeout(apiKey, baseURL, model string, timeout time.Duration) *LLMClient {
+	// If user is logged in to Codebase and no local API key is set,
+	// route through the Codebase inference proxy
+	if apiKey == "" && IsLoggedIn() {
+		token, err := GetAccessToken()
+		if err == nil {
+			return &LLMClient{
+				APIKey:        token,
+				BaseURL:       oauthBaseURL + "/inference",
+				Model:         model,
+				Protocol:      ProtocolChatCompletions, // Inference proxy speaks OpenAI format
+				UseCodebaseAI: true,
+				client:        &http.Client{Timeout: timeout},
+			}
+		}
+	}
+
 	if baseURL == "" {
 		baseURL = "https://api.openai.com/v1"
 	}
@@ -148,29 +166,43 @@ func newLLMClientWithTimeout(apiKey, baseURL, model string, timeout time.Duratio
 }
 
 // detectProtocol determines the API protocol from the base URL and env vars.
+// The protocol describes the wire format, not the provider.
 func detectProtocol(baseURL string) string {
 	// Explicit env var override
 	if p := os.Getenv("LLM_PROTOCOL"); p != "" {
 		switch strings.ToLower(p) {
-		case "anthropic", "claude", "messages":
-			return ProtocolAnthropic
+		case "messages", "anthropic", "claude", "minimax":
+			return ProtocolMessages
+		case "chat_completions", "openai", "chatcompletions":
+			return ProtocolChatCompletions
 		default:
-			return ProtocolOpenAI
+			return ProtocolChatCompletions
 		}
 	}
 	// Auto-detect from URL
 	urlLower := strings.ToLower(baseURL)
-	if strings.Contains(urlLower, "/anthropic") || strings.Contains(urlLower, "anthropic.com") {
-		return ProtocolAnthropic
+	switch {
+	case strings.Contains(urlLower, "anthropic.com"):
+		return ProtocolMessages
+	case strings.Contains(urlLower, "minimax.io/anthropic"),
+		strings.Contains(urlLower, "minimax.chat/anthropic"):
+		return ProtocolMessages
+	default:
+		return ProtocolChatCompletions
 	}
-	return ProtocolOpenAI
+}
+
+// isAnthropicProvider returns true if the base URL points to Anthropic's API.
+// Used for provider-specific headers (anthropic-version).
+func isAnthropicProvider(baseURL string) bool {
+	return strings.Contains(strings.ToLower(baseURL), "anthropic.com")
 }
 
 // StreamChat sends a streaming LLM request and pushes parsed events
 // into the provided channel. Dispatches to the appropriate protocol
 // implementation based on c.Protocol.
 func (c *LLMClient) StreamChat(ctx context.Context, messages []ChatMessage, tools []ToolDef, ch chan<- StreamEvent) {
-	if c.Protocol == ProtocolAnthropic {
+	if c.Protocol == ProtocolMessages {
 		c.streamChatAnthropic(ctx, messages, tools, ch)
 		return
 	}
@@ -333,13 +365,15 @@ func listModels(apiKey, baseURL, protocol string) ([]string, error) {
 	var req *http.Request
 	var err error
 
-	if protocol == ProtocolAnthropic {
+	if protocol == ProtocolMessages {
 		req, err = http.NewRequest("GET", baseURL+"/v1/models", nil)
 		if err != nil {
 			return nil, err
 		}
 		req.Header.Set("x-api-key", apiKey)
-		req.Header.Set("anthropic-version", "2023-06-01")
+		if isAnthropicProvider(baseURL) {
+			req.Header.Set("anthropic-version", "2023-06-01")
+		}
 	} else {
 		req, err = http.NewRequest("GET", baseURL+"/models", nil)
 		if err != nil {

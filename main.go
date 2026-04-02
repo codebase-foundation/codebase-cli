@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -118,8 +119,8 @@ func loadConfig() (*Config, error) {
 	// Resume flag
 	cfg.Resume = *resume
 
-	// If no API key found, mark for setup wizard
-	if cfg.APIKey == "" {
+	// If no API key found, check if logged in to Codebase — otherwise launch setup wizard
+	if cfg.APIKey == "" && !IsLoggedIn() {
 		cfg.NeedsSetup = true
 	}
 
@@ -184,6 +185,53 @@ func saveSavedConfig(sc savedConfig) error {
 
 func main() {
 	loadDotEnv()
+
+	// Handle subcommands before flag parsing
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "login":
+			if err := Login(); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		case "logout":
+			if err := Logout(); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		case "pull":
+			if len(os.Args) < 3 {
+				fmt.Fprintf(os.Stderr, "Usage: codebase pull <project-id>\n")
+				os.Exit(1)
+			}
+			if err := PullProject(os.Args[2]); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		case "whoami":
+			creds, err := loadCredentials()
+			if err != nil {
+				fmt.Println("Not logged in. Run 'codebase login' to authenticate.")
+				return
+			}
+			name := creds.Email
+			if name == "" {
+				name = creds.UserID
+			}
+			fmt.Printf("Logged in as: %s\n", name)
+			fmt.Printf("Scopes: %s\n", creds.Scopes)
+			expired := time.Now().Unix() > creds.ExpiresAt
+			if expired {
+				fmt.Println("Token: expired (will auto-refresh on next API call)")
+			} else {
+				fmt.Printf("Token: valid for %d minutes\n", (creds.ExpiresAt-time.Now().Unix())/60)
+			}
+			return
+		}
+	}
 
 	cfg, err := loadConfig()
 	if err != nil {
