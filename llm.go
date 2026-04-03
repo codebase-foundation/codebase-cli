@@ -136,11 +136,19 @@ func newLLMClientWithTimeout(apiKey, baseURL, model string, timeout time.Duratio
 	if apiKey == "" && IsLoggedIn() {
 		token, err := GetAccessToken()
 		if err == nil {
+			// Detect protocol from model name — MiniMax and Claude use Messages API
+			proto := ProtocolChatCompletions
+			inferenceURL := oauthBaseURL + "/inference"
+			modelLower := strings.ToLower(model)
+			if strings.HasPrefix(modelLower, "minimax") || strings.HasPrefix(modelLower, "claude") {
+				proto = ProtocolMessages
+				// CLI appends /v1/messages to BaseURL for Messages protocol
+			}
 			return &LLMClient{
 				APIKey:        token,
-				BaseURL:       oauthBaseURL + "/inference",
+				BaseURL:       inferenceURL,
 				Model:         model,
-				Protocol:      ProtocolChatCompletions, // Inference proxy speaks OpenAI format
+				Protocol:      proto,
 				UseCodebaseAI: true,
 				client:        &http.Client{Timeout: timeout},
 			}
@@ -151,7 +159,7 @@ func newLLMClientWithTimeout(apiKey, baseURL, model string, timeout time.Duratio
 		baseURL = "https://api.openai.com/v1"
 	}
 	if model == "" {
-		model = "gpt-4o"
+		model = "MiniMax-M2.7"
 	}
 	baseURL = strings.TrimSuffix(baseURL, "/")
 	protocol := detectProtocol(baseURL)
