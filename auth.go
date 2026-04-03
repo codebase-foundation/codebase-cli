@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -264,16 +265,18 @@ func Login() error {
 	}()
 	defer server.Close()
 
-	// Build auth URL — this opens the Codebase login page
-	// The login page handles the actual authentication (email, Google, GitHub, wallet)
-	// and then redirects to our authorize endpoint which generates the code
-	authURL := fmt.Sprintf("%s/login?oauth=true&client_id=%s&redirect_uri=%s&code_challenge=%s&code_challenge_method=S256&scope=%s&state=%s",
+	// Build auth URL with proper URL encoding
+	authParams := url.Values{}
+	authParams.Set("oauth", "true")
+	authParams.Set("client_id", oauthClientID)
+	authParams.Set("redirect_uri", redirectURI)
+	authParams.Set("code_challenge", codeChallenge)
+	authParams.Set("code_challenge_method", "S256")
+	authParams.Set("scope", oauthScopes)
+	authParams.Set("state", state)
+	authURL := fmt.Sprintf("%s/login?%s",
 		strings.TrimSuffix(oauthBaseURL, "/api"),
-		oauthClientID,
-		redirectURI,
-		codeChallenge,
-		oauthScopes,
-		state,
+		authParams.Encode(),
 	)
 
 	fmt.Println("Opening browser for authentication...")
