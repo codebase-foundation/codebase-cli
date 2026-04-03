@@ -338,14 +338,23 @@ func (c *LLMClient) streamChatAnthropic(ctx context.Context, messages []ChatMess
 	var resp *http.Response
 	maxRetries := 3
 	for attempt := 0; attempt <= maxRetries; attempt++ {
-		httpReq, err := http.NewRequestWithContext(ctx, "POST", c.BaseURL+"/v1/messages", bytes.NewReader(jsonBody))
+		requestURL := c.BaseURL + "/v1/messages"
+		debugLog("anthropic: POST %s (model=%s, messages=%d, tools=%d, attempt=%d)",
+			requestURL, req.Model, len(req.Messages), len(req.Tools), attempt)
+		httpReq, err := http.NewRequestWithContext(ctx, "POST", requestURL, bytes.NewReader(jsonBody))
 		if err != nil {
 			ch <- StreamEvent{Type: StreamError, Error: fmt.Errorf("request: %w", err)}
 			return
 		}
 		httpReq.Header.Set("Content-Type", "application/json")
-		httpReq.Header.Set("x-api-key", c.APIKey)
-		httpReq.Header.Set("anthropic-version", "2023-06-01")
+		if c.UseCodebaseAI {
+			httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
+		} else {
+			httpReq.Header.Set("x-api-key", c.APIKey)
+			if isAnthropicProvider(c.BaseURL) {
+				httpReq.Header.Set("anthropic-version", "2023-06-01")
+			}
+		}
 		httpReq.Header.Set("Accept", "text/event-stream")
 
 		resp, err = c.client.Do(httpReq)
@@ -365,9 +374,11 @@ func (c *LLMClient) streamChatAnthropic(ctx context.Context, messages []ChatMess
 		break
 	}
 	defer resp.Body.Close()
+	debugLog("anthropic: response status=%d", resp.StatusCode)
 
 	if resp.StatusCode != 200 {
 		errBody, _ := io.ReadAll(resp.Body)
+		debugLog("anthropic: ERROR body: %s", truncateErrorBody(string(errBody)))
 		ch <- StreamEvent{Type: StreamError, Error: fmt.Errorf("API error %d: %s", resp.StatusCode, truncateErrorBody(string(errBody)))}
 		return
 	}
@@ -546,8 +557,14 @@ func nonStreamingChatAnthropic(client *LLMClient, messages []ChatMessage) (strin
 		return "", fmt.Errorf("request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-api-key", client.APIKey)
-	req.Header.Set("anthropic-version", "2023-06-01")
+	if client.UseCodebaseAI {
+		req.Header.Set("Authorization", "Bearer "+client.APIKey)
+	} else {
+		req.Header.Set("x-api-key", client.APIKey)
+		if isAnthropicProvider(client.BaseURL) {
+			req.Header.Set("anthropic-version", "2023-06-01")
+		}
+	}
 
 	resp, err := client.client.Do(req)
 	if err != nil {

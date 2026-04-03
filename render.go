@@ -72,6 +72,55 @@ func renderToolBlock(toolName string, args map[string]any, output string, state 
 				}
 			}
 		}
+		if toolName == "grep" || toolName == "search_files" {
+			if p, ok := args["pattern"]; ok {
+				if s, ok := p.(string); ok {
+					detail = s
+				}
+			}
+		}
+		if toolName == "glob" {
+			if p, ok := args["pattern"]; ok {
+				if s, ok := p.(string); ok {
+					detail = s
+				}
+			}
+		}
+		if toolName == "shell" {
+			if c, ok := args["command"]; ok {
+				if s, ok := c.(string); ok {
+					detail = s
+				}
+			}
+		}
+		if toolName == "web_search" {
+			if q, ok := args["query"]; ok {
+				if s, ok := q.(string); ok {
+					detail = s
+				}
+			}
+		}
+		if toolName == "web_fetch" {
+			if u, ok := args["url"]; ok {
+				if s, ok := u.(string); ok {
+					detail = s
+				}
+			}
+		}
+		if toolName == "dispatch_agent" {
+			if t, ok := args["task"]; ok {
+				if s, ok := t.(string); ok {
+					detail = s
+				}
+			}
+		}
+		if toolName == "notebook_edit" {
+			if p, ok := args["path"]; ok {
+				if s, ok := p.(string); ok {
+					detail = s
+				}
+			}
+		}
 	}
 
 	// Truncate detail to fit: " label detail icon" must fit in innerW
@@ -123,6 +172,24 @@ func renderToolBlock(toolName string, args map[string]any, output string, state 
 		body = renderSubagentResult(args, output, state, innerW)
 	case "shell":
 		body = renderShellResult(args, output, state, innerW)
+	case "grep":
+		body = renderSearchResult(args, output, state, innerW)
+	case "glob":
+		body = renderListResult(args, output, state, innerW)
+	case "web_search", "web_fetch":
+		body = renderWebResult(toolName, args, output, state, innerW)
+	case "notebook_edit":
+		body = renderNotebookResult(args, output, state, innerW)
+	case "enter_worktree", "exit_worktree":
+		body = renderWorktreeResult(toolName, args, output, state, innerW)
+	case "enter_plan_mode", "exit_plan_mode":
+		body = renderPlanResult(toolName, args, output, state, innerW)
+	case "ask_user":
+		body = renderAskUserResult(args, output, state, innerW)
+	case "config":
+		body = renderConfigResult(args, output, state, innerW)
+	case "save_memory", "read_memory":
+		body = renderMemoryResult(toolName, args, output, state, innerW)
 	case "git_status", "git_diff", "git_log", "git_commit", "git_branch":
 		body = renderGitResult(toolName, args, output, state, innerW)
 	case "create_task", "update_task", "list_tasks", "get_task":
@@ -450,4 +517,80 @@ func renderGitResult(toolName string, args map[string]any, output string, state 
 	}
 	// Show compact output (first 8 lines)
 	return truncateLines(output, 8, width)
+}
+
+// ── New tool rendering ──────────────────────────────────────
+
+func renderWebResult(toolName string, args map[string]any, output string, state string, width int) string {
+	if state == "pending" {
+		if toolName == "web_search" {
+			q, _ := args["query"].(string)
+			return styleMuted.Render(" searching: " + q)
+		}
+		u, _ := args["url"].(string)
+		return styleMuted.Render(" fetching: " + u)
+	}
+	return truncateLines(output, 6, width)
+}
+
+func renderNotebookResult(args map[string]any, output string, state string, width int) string {
+	if state == "pending" {
+		mode, _ := args["edit_mode"].(string)
+		if mode == "" {
+			mode = "replace"
+		}
+		return styleMuted.Render(" " + mode + " cell")
+	}
+	return truncateLines(output, 3, width)
+}
+
+func renderWorktreeResult(toolName string, args map[string]any, output string, state string, width int) string {
+	if state == "pending" {
+		if toolName == "enter_worktree" {
+			return styleMuted.Render(" creating worktree...")
+		}
+		return styleMuted.Render(" cleaning up worktree...")
+	}
+	return truncateLines(output, 4, width)
+}
+
+func renderPlanResult(toolName string, args map[string]any, output string, state string, width int) string {
+	if state == "pending" {
+		if toolName == "enter_plan_mode" {
+			return styleMuted.Render(" entering plan mode...")
+		}
+		return styleMuted.Render(" presenting plan...")
+	}
+	return truncateLines(output, 6, width)
+}
+
+func renderAskUserResult(args map[string]any, output string, state string, width int) string {
+	if state == "pending" {
+		q, _ := args["question"].(string)
+		if q != "" && len(q) > 60 {
+			q = q[:57] + "..."
+		}
+		return styleMuted.Render(" " + q)
+	}
+	return truncateLines(output, 8, width)
+}
+
+func renderConfigResult(args map[string]any, output string, state string, width int) string {
+	if state == "pending" {
+		action, _ := args["action"].(string)
+		key, _ := args["key"].(string)
+		return styleMuted.Render(" " + action + " " + key)
+	}
+	return truncateLines(output, 4, width)
+}
+
+func renderMemoryResult(toolName string, args map[string]any, output string, state string, width int) string {
+	if state == "pending" {
+		fn, _ := args["filename"].(string)
+		if toolName == "save_memory" {
+			return styleMuted.Render(" saving: " + fn)
+		}
+		return styleMuted.Render(" reading: " + fn)
+	}
+	return truncateLines(output, 4, width)
 }

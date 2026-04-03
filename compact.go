@@ -91,28 +91,29 @@ func needsCompaction(messages []ChatMessage, model string) bool {
 	return float64(estimated) > threshold
 }
 
-const summarizationPrompt = `You are summarizing a coding session for handoff to the next turn of the agent.
+// Structured summarization prompt — 9 sections matching CC's best practices,
+// plus analysis/summary split where the analysis acts as a scratchpad that
+// gets stripped before injection. This produces better summaries because
+// the model "thinks" in <analysis> before committing to <summary>.
+const summarizationPrompt = `CRITICAL: Respond with TEXT ONLY. Do NOT call any tools. You already have all the context you need.
 
-Create a structured summary covering:
+Your task is to create a detailed summary of the coding session so far. The assistant who reads this summary will continue the work — they need enough detail to proceed without re-reading files.
 
-## Progress
-- What has been accomplished so far (completed tasks, created/modified files)
-- Key decisions made and why
+First, write an <analysis> section where you think through what matters. Then write a <summary> section with the actual handoff content. The analysis is a scratchpad — only the summary will be kept.
 
-## Context
-- Important file paths and their purposes
-- Dependencies, configurations, or constraints discovered
-- User preferences or requirements established
+Your summary MUST include these sections:
 
-## Current State
-- What was just done (the most recent changes)
-- Any errors encountered and how they were resolved
+1. **Primary Request and Intent** — What the user asked for, including nuances and constraints
+2. **Key Technical Decisions** — Architecture choices, libraries picked, approaches chosen and why
+3. **Files Modified** — Every file created, modified, or deleted with what changed. Include paths.
+4. **Code Context** — Important functions, types, variables, and patterns. Include actual signatures and snippets for anything the next assistant will need to reference
+5. **Errors and Fixes** — Every error encountered, what caused it, and how it was resolved. Include the exact error text.
+6. **User Messages** — ALL user messages that aren't tool results. Their exact words matter for intent.
+7. **Current State** — What was just done in the most recent turn. What files are open/hot.
+8. **Pending Work** — What still needs to be done, in order of priority
+9. **Open Questions** — Anything unresolved, uncertain, or that needs user input
 
-## Next Steps
-- What remains to be done
-- Any blockers or open questions
-
-Be concise but complete. Include specific file paths, function names, and error messages — the next assistant needs enough detail to continue seamlessly without re-reading files.`
+Be specific: include file paths, line numbers, function names, error messages, and code snippets. Vague summaries are useless.`
 
 const summaryPrefix = "[Conversation compacted — summary of previous work follows]\n\n"
 
@@ -200,7 +201,9 @@ func compactHistory(client *LLMClient, messages []ChatMessage) ([]ChatMessage, b
 		sb.WriteString("\n")
 	}
 
-	// Call LLM for summarization (non-streaming)
+	// Call LLM for summarization — use glue (cheap/fast) model if available,
+	// fall back to main model. This is a differentiator over CC which always
+	// uses the main model for compaction.
 	summary, err := nonStreamingChat(client, []ChatMessage{
 		{Role: "system", Content: strPtr(summarizationPrompt)},
 		{Role: "user", Content: strPtr("Here is the conversation history to summarize:\n\n" + sb.String())},
@@ -209,6 +212,10 @@ func compactHistory(client *LLMClient, messages []ChatMessage) ([]ChatMessage, b
 		// Don't crash — continue with full history
 		return messages, false
 	}
+
+	// Strip <analysis> section — it's a thinking scratchpad, not informational.
+	// Keep only <summary> content (or everything if no tags found).
+	summary = stripAnalysis(summary)
 
 	// Rebuild: system + summary + ack + recent
 	var compacted []ChatMessage
@@ -221,16 +228,36 @@ func compactHistory(client *LLMClient, messages []ChatMessage) ([]ChatMessage, b
 	})
 	compacted = append(compacted, ChatMessage{
 		Role:    "assistant",
-		Content: strPtr("I have the context from our previous conversation. Continuing from where we left off."),
+		Content: strPtr("I have the full context from our previous work. Continuing seamlessly."),
 	})
 	compacted = append(compacted, toKeep...)
 
 	return compacted, true
 }
 
+// stripAnalysis removes <analysis>...</analysis> blocks and extracts
+// <summary>...</summary> content. If no tags found, returns the original.
+func stripAnalysis(text string) string {
+	// Remove analysis block
+	if idx := strings.Index(text, "<analysis>"); idx >= 0 {
+		if end := strings.Index(text, "</analysis>"); end >= 0 {
+			text = text[:idx] + text[end+len("</analysis>"):]
+		}
+	}
+
+	// Extract summary content if tagged
+	if idx := strings.Index(text, "<summary>"); idx >= 0 {
+		if end := strings.Index(text, "</summary>"); end >= 0 {
+			text = strings.TrimSpace(text[idx+len("<summary>") : end])
+		}
+	}
+
+	return strings.TrimSpace(text)
+}
+
 // nonStreamingChat makes a non-streaming LLM call, dispatching by protocol.
 func nonStreamingChat(client *LLMClient, messages []ChatMessage) (string, error) {
-	if client.Protocol == ProtocolAnthropic {
+	if client.Protocol == ProtocolMessages {
 		return nonStreamingChatAnthropic(client, messages)
 	}
 	return nonStreamingChatOpenAI(client, messages)

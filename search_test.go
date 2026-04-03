@@ -163,35 +163,21 @@ func TestMinHelper(t *testing.T) {
 
 // ── Tool integration ─────────────────────────────────────────
 
-func TestToolWebSearchInToolDefs(t *testing.T) {
-	found := false
-	for _, td := range toolDefs {
-		if td.Function.Name == "web_search" {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Error("web_search should be in toolDefs")
+func TestWebSearchInRegistry(t *testing.T) {
+	if !globalRegistry.Has("web_search") {
+		t.Error("web_search should be in registry")
 	}
 }
 
 func TestWebSearchIsParallelSafe(t *testing.T) {
-	if !IsParallelSafe("web_search") {
+	if !registryIsParallelSafe("web_search", nil) {
 		t.Error("web_search should be parallel-safe")
 	}
 }
 
-func TestWebSearchInSubagentToolDefs(t *testing.T) {
-	found := false
-	for _, td := range subagentToolDefs {
-		if td.Function.Name == "web_search" {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Error("web_search should be in subagentToolDefs")
+func TestWebSearchInSubagentTools(t *testing.T) {
+	if !readOnlyTools["web_search"] {
+		t.Error("web_search should be in readOnlyTools")
 	}
 }
 

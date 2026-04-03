@@ -39,6 +39,7 @@ type providerPreset struct {
 }
 
 var providers = []providerPreset{
+	{name: "Login with Codebase", baseURL: "__codebase_login__", keyHint: "browser login"},
 	{name: "OpenAI", baseURL: "https://api.openai.com/v1", keyHint: "sk-..."},
 	{name: "Anthropic", baseURL: "https://api.anthropic.com", keyHint: "sk-ant-..."},
 	{name: "OpenRouter", baseURL: "https://openrouter.ai/api/v1", keyHint: "sk-or-..."},
@@ -156,6 +157,23 @@ func (m setupModel) handleKey(msg tea.KeyMsg) (setupModel, tea.Cmd) {
 		m.providerIdx = newIdx
 		if entered {
 			p := providers[m.providerIdx]
+
+			// Codebase login — launch browser OAuth flow
+			if p.baseURL == "__codebase_login__" {
+				return m, func() tea.Msg {
+					err := Login()
+					if err != nil {
+						return modelsFetchedMsg{err: err}
+					}
+					// Login succeeded — load credentials and configure
+					return setupDoneMsg{config: savedConfig{
+						APIKey:  "__codebase_oauth__",
+						BaseURL: oauthBaseURL + "/inference",
+						Model:   "MiniMax-M2.7",
+					}}
+				}
+			}
+
 			if p.baseURL == "" {
 				m.step = stepCustomURL
 				m.input.SetValue("")

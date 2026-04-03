@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -29,17 +30,38 @@ type Config struct {
 	Model      string
 	WorkDir    string
 	Resume     bool // --resume flag: restore previous session
+	Debug      bool // --debug flag: verbose logging to stderr
 	NeedsSetup bool // true when no API key found — launch setup wizard
+}
+
+// debugLog writes to stderr when debug mode is enabled.
+// Global so any file can call it without passing config around.
+var debugMode bool
+
+func debugLog(format string, args ...any) {
+	if debugMode {
+		fmt.Fprintf(os.Stderr, "[DEBUG] "+format+"\n", args...)
+	}
+}
+
+func truncateStr(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max-3] + "..."
 }
 
 func loadConfig() (*Config, error) {
 	// CLI flags
-	model := flag.String("model", "", "LLM model name (default: gpt-4o)")
+	model := flag.String("model", "", "LLM model name (default: MiniMax-M2.7)")
 	dir := flag.String("dir", "", "Working directory (default: current dir)")
 	baseURL := flag.String("base-url", "", "OpenAI-compatible API base URL")
 	resume := flag.Bool("resume", false, "Resume previous session for this directory")
+	debug := flag.Bool("debug", false, "Verbose debug output to stderr")
 	showVersion := flag.Bool("version", false, "Print version and exit")
 	flag.Parse()
+
+	debugMode = *debug
 
 	if *showVersion {
 		fmt.Printf("codebase %s (%s)\n", version, commit)
@@ -77,7 +99,7 @@ func loadConfig() (*Config, error) {
 		if saved.Model != "" {
 			cfg.Model = saved.Model
 		} else {
-			cfg.Model = "gpt-4o"
+			cfg.Model = "MiniMax-M2.7"
 		}
 	}
 
@@ -229,6 +251,19 @@ func main() {
 			} else {
 				fmt.Printf("Token: valid for %d minutes\n", (creds.ExpiresAt-time.Now().Unix())/60)
 			}
+			return
+
+		case "run":
+			// Headless mode — run a prompt without TUI, output everything to stdout.
+			// Usage: codebase run "your prompt here"
+			// Add -debug for verbose output to stderr.
+			debugMode = true // always debug in headless mode
+			if len(os.Args) < 3 {
+				fmt.Fprintf(os.Stderr, "Usage: codebase run \"your prompt\"\n")
+				os.Exit(1)
+			}
+			prompt := strings.Join(os.Args[2:], " ")
+			runHeadless(prompt)
 			return
 		}
 	}

@@ -29,7 +29,7 @@ func TestAnthropicIntegrationBasicChat(t *testing.T) {
 		30*time.Second,
 	)
 
-	if client.Protocol != ProtocolAnthropic {
+	if client.Protocol != ProtocolMessages {
 		t.Fatalf("expected anthropic protocol, got %s", client.Protocol)
 	}
 

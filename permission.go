@@ -19,9 +19,11 @@ const (
 
 // PermissionRequest is sent from the agent goroutine to the TUI.
 type PermissionRequest struct {
-	Tool    string
-	Args    map[string]any
-	Summary string // human-readable description
+	Tool        string
+	Args        map[string]any
+	Summary     string // human-readable description
+	Risk        string // "LOW", "MEDIUM", "HIGH" — from glue explainer
+	Explanation string // glue-generated explanation of what this does
 }
 
 // PermissionResponse is sent back from the TUI to the agent.

@@ -10,30 +10,30 @@ import (
 //  Protocol detection tests
 // ──────────────────────────────────────────────────────────────
 
-func TestDetectProtocolOpenAI(t *testing.T) {
+func TestDetectProtocolChatCompletions(t *testing.T) {
 	p := detectProtocol("https://api.openai.com/v1")
-	if p != ProtocolOpenAI {
+	if p != ProtocolChatCompletions {
 		t.Errorf("expected openai, got %s", p)
 	}
 }
 
 func TestDetectProtocolMiniMaxV1(t *testing.T) {
 	p := detectProtocol("https://api.minimax.io/v1")
-	if p != ProtocolOpenAI {
+	if p != ProtocolChatCompletions {
 		t.Errorf("expected openai for minimax v1, got %s", p)
 	}
 }
 
 func TestDetectProtocolMiniMaxAnthropic(t *testing.T) {
 	p := detectProtocol("https://api.minimax.io/anthropic")
-	if p != ProtocolAnthropic {
+	if p != ProtocolMessages {
 		t.Errorf("expected anthropic, got %s", p)
 	}
 }
 
-func TestDetectProtocolAnthropicDotCom(t *testing.T) {
+func TestDetectProtocolMessagesDotCom(t *testing.T) {
 	p := detectProtocol("https://api.anthropic.com")
-	if p != ProtocolAnthropic {
+	if p != ProtocolMessages {
 		t.Errorf("expected anthropic, got %s", p)
 	}
 }
@@ -43,7 +43,7 @@ func TestDetectProtocolEnvOverride(t *testing.T) {
 	defer os.Unsetenv("LLM_PROTOCOL")
 
 	p := detectProtocol("https://api.openai.com/v1")
-	if p != ProtocolAnthropic {
+	if p != ProtocolMessages {
 		t.Errorf("env override should force anthropic, got %s", p)
 	}
 }
@@ -53,7 +53,7 @@ func TestDetectProtocolEnvClaude(t *testing.T) {
 	defer os.Unsetenv("LLM_PROTOCOL")
 
 	p := detectProtocol("https://api.minimax.io/v1")
-	if p != ProtocolAnthropic {
+	if p != ProtocolMessages {
 		t.Errorf("env LLM_PROTOCOL=claude should map to anthropic, got %s", p)
 	}
 }
@@ -314,16 +314,16 @@ func TestAnthropicRequestSerialization(t *testing.T) {
 //  LLMClient protocol field
 // ──────────────────────────────────────────────────────────────
 
-func TestLLMClientProtocolOpenAI(t *testing.T) {
+func TestLLMClientProtocolChatCompletions(t *testing.T) {
 	client := NewLLMClient("key", "https://api.minimax.io/v1", "model")
-	if client.Protocol != ProtocolOpenAI {
+	if client.Protocol != ProtocolChatCompletions {
 		t.Errorf("expected openai protocol, got %s", client.Protocol)
 	}
 }
 
-func TestLLMClientProtocolAnthropic(t *testing.T) {
+func TestLLMClientProtocolMessages(t *testing.T) {
 	client := NewLLMClient("key", "https://api.minimax.io/anthropic", "model")
-	if client.Protocol != ProtocolAnthropic {
+	if client.Protocol != ProtocolMessages {
 		t.Errorf("expected anthropic protocol, got %s", client.Protocol)
 	}
 }

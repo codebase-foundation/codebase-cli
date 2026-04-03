@@ -92,12 +92,16 @@ type chatModel struct {
 
 	// Task tracking
 	tasks *TaskStore
+
+	// Quit guard
+	ctrlCPending bool // true after first ctrl+c, reset on timeout or other input
 }
 
 // Messages
 type agentEventMsg AgentEvent
 type flashTickMsg struct{}
 type narrateTickMsg struct{}
+type ctrlCTimeoutMsg struct{}
 type notifyTickMsg struct{}
 type glueResultMsg struct {
 	kind        string // "chat", "clarify", "title", "celebrate", "suggest", "narrate"
@@ -141,9 +145,13 @@ func newChatModel(cfg *Config) chatModel {
 	}
 	s.Style = lipgloss.NewStyle().Foreground(colAccent)
 
-	// Welcome segment
+	// Welcome segment — check for IDE connection
+	welcomeText := "  Welcome to Codebase. Type a prompt to begin.\n"
+	if ide := DiscoverIDE(cfg.WorkDir); ide != nil {
+		welcomeText = "  Welcome to Codebase. " + styleDim.Render("IDE: "+ide.IDEInfo()) + "\n"
+	}
 	welcome := []segment{
-		{kind: "text", text: styleMuted.Render("  Welcome to Codebase. Type a prompt to begin.\n")},
+		{kind: "text", text: styleMuted.Render(welcomeText)},
 	}
 
 	return chatModel{
@@ -261,11 +269,18 @@ func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 				m.rebuildViewport()
 				return m, nil
 			}
-			// Clean up audio before quitting
-			if m.chimePlayer != nil {
-				m.chimePlayer.Stop()
+			// Double ctrl+c to quit — first press shows warning, second quits
+			if m.ctrlCPending {
+				// Second press — actually quit
+				if m.chimePlayer != nil {
+					m.chimePlayer.Stop()
+				}
+				return m, tea.Quit
 			}
-			return m, tea.Quit
+			// First press — show warning, arm the timeout
+			m.ctrlCPending = true
+			m.notify.Push(Notification{Type: NotifyWarn, Text: "Press ctrl+c again to quit", Duration: 3 * time.Second})
+			return m, tea.Tick(3*time.Second, func(t time.Time) tea.Msg { return ctrlCTimeoutMsg{} })
 
 		// Permission picker — arrow keys to select, enter to confirm
 		case "left", "h":
@@ -301,6 +316,9 @@ func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 			}
 
 		case "enter":
+			// Any input resets the ctrl+c quit guard
+			m.ctrlCPending = false
+
 			// Permission: enter confirms the picker selection
 			if m.state == chatPermission {
 				m.input.SetValue("")
@@ -519,6 +537,11 @@ func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 			m.rebuildViewport()
 		}
 
+	case ctrlCTimeoutMsg:
+		// ctrl+c window expired — reset the guard
+		m.ctrlCPending = false
+		return m, nil
+
 	case narrateTickMsg:
 		if m.state == chatStreaming && len(m.recentActions) > 0 &&
 			time.Since(m.lastNarration) > 6*time.Second {
@@ -694,7 +717,7 @@ func (m *chatModel) startAgent(prompt string) {
 	// Reuse existing agent for conversation continuity, or create new one
 	if m.agent == nil {
 		client := NewLLMClient(m.config.APIKey, m.config.BaseURL, m.config.Model)
-		m.agent = NewAgent(client, m.config.WorkDir, m.eventCh, m.stopCh, m.tasks)
+		m.agent = NewAgent(client, m.config.WorkDir, m.eventCh, m.stopCh, m.tasks, m.glue)
 
 		// Only restore session if --resume flag was passed
 		if m.config.Resume {
@@ -1298,23 +1321,77 @@ func (m chatModel) View() string {
 func (m *chatModel) renderPermissionPicker() string {
 	var sb strings.Builder
 
-	// Context box — centered
 	if m.permRequest != nil {
-		summary := m.permRequest.Summary
+		// Build box content — use lipgloss.PlaceHorizontal for reliable centering.
+		// Key fix: set an explicit width on the box so borders align correctly.
+		// Don't mix ANSI styles inside the box content string — style the box itself.
+
+		// Line 1: action summary with risk badge
+		line1 := m.permRequest.Summary
+		riskTag := ""
+		if m.permRequest.Risk != "" {
+			riskTag = " [" + m.permRequest.Risk + " RISK]"
+		}
+
+		// Line 2: explanation (if available)
+		line2 := ""
+		if m.permRequest.Explanation != "" {
+			line2 = m.permRequest.Explanation
+		}
+
+		// Calculate box width — clamp to terminal width with margin
+		maxBoxW := m.width - 4
+		if maxBoxW < 30 {
+			maxBoxW = 30
+		}
+		contentW := lipgloss.Width(line1 + riskTag)
+		if line2 != "" {
+			if w := lipgloss.Width(line2); w > contentW {
+				contentW = w
+			}
+		}
+		boxInnerW := contentW + 4 // padding
+		if boxInnerW > maxBoxW {
+			boxInnerW = maxBoxW
+		}
+
+		// Build styled content lines
+		var boxLines []string
+
+		// Action line with risk coloring
+		actionLine := styleMuted.Render(line1)
+		if riskTag != "" {
+			switch m.permRequest.Risk {
+			case "LOW":
+				actionLine += styleOK.Render(riskTag)
+			case "MEDIUM":
+				actionLine += styleWarn.Render(riskTag)
+			case "HIGH":
+				actionLine += lipgloss.NewStyle().Foreground(colError).Bold(true).Render(riskTag)
+			}
+		}
+		boxLines = append(boxLines, actionLine)
+
+		if line2 != "" {
+			boxLines = append(boxLines, styleDim.Render(line2))
+		}
+
+		boxContent := strings.Join(boxLines, "\n")
+
+		// Render box with explicit width for reliable borders
 		box := lipgloss.NewStyle().
+			Width(boxInnerW).
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(colOrange).
 			Padding(0, 1).
-			Render(styleWarn.Render("⚡ ") + styleMuted.Render(summary))
-		boxW := lipgloss.Width(box)
-		pad := (m.width - boxW) / 2
-		if pad < 0 {
-			pad = 0
-		}
-		sb.WriteString(strings.Repeat(" ", pad) + box + "\n")
+			Render(boxContent)
+
+		// Center the box
+		sb.WriteString(lipgloss.PlaceHorizontal(m.width, lipgloss.Center, box))
+		sb.WriteString("\n")
 	}
 
-	// Option picker
+	// Option picker — also use PlaceHorizontal for centering
 	type permOption struct {
 		label string
 		desc  string
@@ -1329,26 +1406,17 @@ func (m *chatModel) renderPermissionPicker() string {
 	var optParts []string
 	for i, opt := range options {
 		if i == m.permChoice {
-			optParts = append(optParts, lipgloss.NewStyle().Foreground(colAccent).Bold(true).Render("▸ "+opt.label))
+			optParts = append(optParts, lipgloss.NewStyle().Foreground(colAccent).Bold(true).Render("> "+opt.label))
 		} else {
 			optParts = append(optParts, styleDim.Render("  "+opt.label))
 		}
 	}
 	optLine := strings.Join(optParts, "   ")
-	optW := lipgloss.Width(optLine)
-	optPad := (m.width - optW) / 2
-	if optPad < 0 {
-		optPad = 0
-	}
-	sb.WriteString(strings.Repeat(" ", optPad) + optLine + "\n")
+	sb.WriteString(lipgloss.PlaceHorizontal(m.width, lipgloss.Center, optLine))
+	sb.WriteString("\n")
 
 	descText := styleMuted.Render(options[m.permChoice].desc)
-	descW := lipgloss.Width(descText)
-	descPad := (m.width - descW) / 2
-	if descPad < 0 {
-		descPad = 0
-	}
-	sb.WriteString(strings.Repeat(" ", descPad) + descText)
+	sb.WriteString(lipgloss.PlaceHorizontal(m.width, lipgloss.Center, descText))
 
 	return sb.String()
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"regexp"
 	"strings"
@@ -116,12 +117,12 @@ func init() {
 			sb.WriteString(styleMuted.Render("  Session info:") + "\n")
 			sb.WriteString(styleDim.Render("  Model:    ") + styleMuted.Render(m.config.Model) + "\n")
 			// Protocol (API format)
-			proto := ProtocolOpenAI
+			proto := ProtocolChatCompletions
 			if m.agent != nil {
 				proto = m.agent.client.Protocol
 			}
 			protoLabel := "Chat Completions (OpenAI)"
-			if proto == ProtocolAnthropic {
+			if proto == ProtocolMessages {
 				protoLabel = "Messages API (Anthropic)"
 			}
 			sb.WriteString(styleDim.Render("  Protocol: ") + styleMuted.Render(protoLabel) + "\n")
@@ -390,6 +391,277 @@ func init() {
 		},
 	},
 	{
+		name: "cost",
+		desc: "Show token usage and estimated cost",
+		handler: func(m *chatModel, args string) tea.Cmd {
+			total := m.tokens.PromptTokens + m.tokens.CompletionTokens
+			cost := estimateCost(m.config.Model, m.tokens.PromptTokens, m.tokens.CompletionTokens)
+			costStr := ""
+			if cost != "" {
+				costStr = " (~" + cost + ")"
+			}
+			m.segments = append(m.segments, segment{
+				kind: "text",
+				text: styleMuted.Render(fmt.Sprintf("  %d tokens (%d in + %d out)%s\n", total, m.tokens.PromptTokens, m.tokens.CompletionTokens, costStr)),
+			})
+			m.rebuildViewport()
+			return nil
+		},
+	},
+	{
+		name:    "status",
+		aliases: []string{"s"},
+		desc:    "Quick status: model, tokens, turns",
+		handler: func(m *chatModel, args string) tea.Cmd {
+			histLen := 0
+			if m.agent != nil {
+				histLen = len(m.agent.history)
+			}
+			cost := estimateCost(m.config.Model, m.tokens.PromptTokens, m.tokens.CompletionTokens)
+			costStr := ""
+			if cost != "" {
+				costStr = " " + styleDim.Render("~"+cost)
+			}
+			m.segments = append(m.segments, segment{
+				kind: "text",
+				text: styleDim.Render("  ") +
+					styleAccentText.Render(m.config.Model) +
+					styleMuted.Render(fmt.Sprintf(" | %d tokens%s | %d turns | %d messages | %d files",
+						m.tokens.PromptTokens+m.tokens.CompletionTokens, costStr, m.turns, histLen, m.files)) + "\n",
+			})
+			m.rebuildViewport()
+			return nil
+		},
+	},
+	{
+		name: "context",
+		desc: "Show context window usage",
+		handler: func(m *chatModel, args string) tea.Cmd {
+			modelName := m.config.Model
+			window := getContextWindow(modelName)
+			used := 0
+			if m.agent != nil {
+				used = estimateTotalTokens(m.agent.history)
+			}
+			pct := 0.0
+			if window > 0 {
+				pct = float64(used) / float64(window) * 100
+			}
+			// Visual bar
+			barWidth := 30
+			filled := int(pct / 100.0 * float64(barWidth))
+			if filled > barWidth {
+				filled = barWidth
+			}
+			bar := strings.Repeat("█", filled) + strings.Repeat("░", barWidth-filled)
+
+			color := styleOK
+			if pct > 75 {
+				color = styleWarn
+			}
+			if pct > 90 {
+				color = styleWarn
+			}
+
+			m.segments = append(m.segments, segment{
+				kind: "text",
+				text: styleMuted.Render("  Context: ") +
+					color.Render(fmt.Sprintf("[%s] %.0f%%", bar, pct)) +
+					styleDim.Render(fmt.Sprintf(" (%dk / %dk)", used/1000, window/1000)) + "\n",
+			})
+			m.rebuildViewport()
+			return nil
+		},
+	},
+	{
+		name: "memory",
+		desc: "View saved memories for this project",
+		handler: func(m *chatModel, args string) tea.Cmd {
+			memories := loadMemories(m.config.WorkDir)
+			if memories == "" {
+				m.segments = append(m.segments, segment{
+					kind: "text",
+					text: styleMuted.Render("  No memories saved for this project yet.\n") +
+						styleDim.Render("  The agent saves memories automatically, or you can ask it to remember something.\n"),
+				})
+			} else {
+				m.segments = append(m.segments, segment{
+					kind: "text",
+					text: styleMuted.Render("  Project memories:\n\n") + styleDim.Render(memories) + "\n",
+				})
+			}
+			m.rebuildViewport()
+			return nil
+		},
+	},
+	{
+		name: "commit",
+		desc: "Generate a commit from current changes (prompt-type)",
+		handler: func(m *chatModel, args string) tea.Cmd {
+			prompt := `Look at the current git status and diff, then create a well-crafted commit:
+
+1. Run git_status to see what changed
+2. Run git_diff to see the actual changes
+3. Write a clear, concise commit message following conventional commit style
+4. Stage the relevant files and create the commit
+
+If there are no changes to commit, say so.`
+			if args != "" {
+				prompt = fmt.Sprintf("Create a git commit with this guidance: %s\n\n"+
+					"Run git_status and git_diff first to understand the changes, then stage and commit.", args)
+			}
+			m.startAgent(prompt)
+			return m.waitForEvent()
+		},
+	},
+	{
+		name: "review",
+		desc: "Review current changes or a PR (prompt-type)",
+		handler: func(m *chatModel, args string) tea.Cmd {
+			prompt := `Review the current uncommitted changes for quality, bugs, and improvements:
+
+1. Run git_diff to see all changes
+2. Read the modified files for full context
+3. Provide a thorough code review covering:
+   - Correctness: any bugs or logic errors?
+   - Style: does it follow the project's conventions?
+   - Security: any vulnerabilities introduced?
+   - Performance: any obvious inefficiencies?
+   - Testing: should tests be added or updated?
+
+Be specific — reference file:line_number for each issue.`
+			if args != "" {
+				prompt = fmt.Sprintf("Review this: %s\n\nRead the relevant code and provide a thorough code review.", args)
+			}
+			m.startAgent(prompt)
+			return m.waitForEvent()
+		},
+	},
+	{
+		name: "plan",
+		desc: "Enter planning mode — explore before coding",
+		handler: func(m *chatModel, args string) tea.Cmd {
+			prompt := "Enter plan mode. "
+			if args != "" {
+				prompt += "I want to plan: " + args
+			} else {
+				prompt += "Help me think through and plan the next piece of work. Read the codebase to understand the current state, then suggest an approach."
+			}
+			m.startAgent(prompt)
+			return m.waitForEvent()
+		},
+	},
+	{
+		name: "export",
+		desc: "Export conversation to file (usage: /export [filename])",
+		handler: func(m *chatModel, args string) tea.Cmd {
+			filename := args
+			if filename == "" {
+				filename = "conversation.md"
+			}
+			var sb strings.Builder
+			sb.WriteString("# Codebase CLI Conversation\n\n")
+			for _, seg := range m.segments {
+				text := stripANSI(seg.text)
+				switch seg.kind {
+				case "user":
+					sb.WriteString("## User\n" + strings.TrimSpace(text) + "\n\n")
+				case "text":
+					sb.WriteString(strings.TrimSpace(text) + "\n\n")
+				case "tool":
+					if seg.tool != nil {
+						sb.WriteString(fmt.Sprintf("**Tool: %s** (%s)\n", seg.tool.name, seg.tool.state))
+						if seg.tool.output != "" {
+							out := seg.tool.output
+							if len(out) > 500 {
+								out = out[:500] + "..."
+							}
+							sb.WriteString("```\n" + out + "\n```\n\n")
+						}
+					}
+				case "error":
+					sb.WriteString("**Error:** " + strings.TrimSpace(text) + "\n\n")
+				}
+			}
+
+			if err := writeExportFile(m.config.WorkDir, filename, sb.String()); err != nil {
+				m.segments = append(m.segments, segment{
+					kind: "text",
+					text: styleWarn.Render(fmt.Sprintf("  Error exporting: %v\n", err)),
+				})
+			} else {
+				m.segments = append(m.segments, segment{
+					kind: "text",
+					text: styleOK.Render("  ✓ ") + styleMuted.Render("Exported to "+filename+"\n"),
+				})
+			}
+			m.rebuildViewport()
+			return nil
+		},
+	},
+	{
+		name: "undo",
+		desc: "Revert last file change (from session history, or git)",
+		handler: func(m *chatModel, args string) tea.Cmd {
+			if args == "" {
+				// No file specified — show recent history
+				if m.agent != nil && m.agent.fileHistory.Count() > 0 {
+					recent := m.agent.fileHistory.Recent(5)
+					var sb strings.Builder
+					sb.WriteString(styleMuted.Render("  Recent file snapshots (newest first):\n\n"))
+					for _, snap := range recent {
+						size := len(snap.Content)
+						sb.WriteString(styleDim.Render(fmt.Sprintf("    %s (%d bytes, turn %d)\n", snap.RelPath, size, snap.Turn)))
+					}
+					sb.WriteString("\n" + styleMuted.Render("  Usage: /undo <file-path>\n"))
+					m.segments = append(m.segments, segment{kind: "text", text: sb.String()})
+				} else {
+					m.segments = append(m.segments, segment{
+						kind: "text",
+						text: styleMuted.Render("  No file history yet. Usage: /undo <file-path>\n"),
+					})
+				}
+				m.rebuildViewport()
+				return nil
+			}
+
+			// Try session file history first (more precise than git)
+			if m.agent != nil {
+				snap := m.agent.fileHistory.UndoByRelPath(args)
+				if snap != nil {
+					action := "Restored"
+					if snap.Content == nil {
+						action = "Deleted (file didn't exist before)"
+					}
+					m.segments = append(m.segments, segment{
+						kind: "text",
+						text: styleOK.Render("  ✓ ") + styleMuted.Render(fmt.Sprintf("%s: %s (from turn %d snapshot)\n", action, args, snap.Turn)),
+					})
+					m.rebuildViewport()
+					return nil
+				}
+			}
+
+			// Fall back to git checkout
+			cmd := exec.Command("git", "checkout", "--", args)
+			cmd.Dir = m.config.WorkDir
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				m.segments = append(m.segments, segment{
+					kind: "text",
+					text: styleWarn.Render(fmt.Sprintf("  Error: %s %s\n", err, string(out))),
+				})
+			} else {
+				m.segments = append(m.segments, segment{
+					kind: "text",
+					text: styleOK.Render("  ✓ ") + styleMuted.Render("Reverted via git: "+args+"\n"),
+				})
+			}
+			m.rebuildViewport()
+			return nil
+		},
+	},
+	{
 		name:    "quit",
 		aliases: []string{"exit", "q"},
 		desc:    "Exit codebase",
@@ -513,6 +785,14 @@ var ansiRegex = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
 
 func stripANSI(s string) string {
 	return ansiRegex.ReplaceAllString(s, "")
+}
+
+func writeExportFile(workDir, filename, content string) error {
+	path := filename
+	if !strings.HasPrefix(path, "/") {
+		path = workDir + "/" + filename
+	}
+	return os.WriteFile(path, []byte(content), 0644)
 }
 
 func copyToClipboard(text string) error {

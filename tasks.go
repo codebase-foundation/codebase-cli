@@ -282,3 +282,16 @@ func toolGetTask(args map[string]interface{}, store *TaskStore) (string, bool) {
 	result, _ := json.MarshalIndent(task, "", "  ")
 	return string(result), true
 }
+
+// ──────────────────────────────────────────────────────────────
+//  tool.TaskManager interface implementation
+//
+//  These adapter methods let TaskStore be injected into tools via
+//  the Env struct without the internal/tool package knowing about
+//  TaskStore's internals.
+// ──────────────────────────────────────────────────────────────
+
+func (s *TaskStore) CreateTask(args map[string]any) (string, bool) { return toolCreateTask(args, s) }
+func (s *TaskStore) UpdateTask(args map[string]any) (string, bool) { return toolUpdateTask(args, s) }
+func (s *TaskStore) ListTasks(args map[string]any) (string, bool)  { return toolListTasks(args, s) }
+func (s *TaskStore) GetTask(args map[string]any) (string, bool)    { return toolGetTask(args, s) }

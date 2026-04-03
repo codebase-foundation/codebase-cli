@@ -56,8 +56,20 @@ var defaultCheckers = []LanguageChecker{
 		Parse: parseGoVetOutput,
 	},
 	{
+		Name:       "Go Build",
+		Extensions: []string{".go"},
+		Detect: func(workDir string) bool {
+			_, err := os.Stat(filepath.Join(workDir, "go.mod"))
+			return err == nil
+		},
+		Command: func(workDir string) (string, []string) {
+			return "go", []string{"build", "./..."}
+		},
+		Parse: parseGoVetOutput, // same format: file:line:col: message
+	},
+	{
 		Name:       "TypeScript",
-		Extensions: []string{".ts", ".tsx"},
+		Extensions: []string{".ts", ".tsx", ".js", ".jsx"},
 		Detect: func(workDir string) bool {
 			if _, err := os.Stat(filepath.Join(workDir, "tsconfig.json")); err == nil {
 				return true
@@ -65,7 +77,6 @@ var defaultCheckers = []LanguageChecker{
 			return false
 		},
 		Command: func(workDir string) (string, []string) {
-			// Prefer project-local tsc
 			if _, err := os.Stat(filepath.Join(workDir, "node_modules", ".bin", "tsc")); err == nil {
 				return "npx", []string{"tsc", "--noEmit", "--pretty", "false"}
 			}
@@ -77,16 +88,60 @@ var defaultCheckers = []LanguageChecker{
 		Parse: parseTscOutput,
 	},
 	{
+		Name:       "ESLint",
+		Extensions: []string{".ts", ".tsx", ".js", ".jsx"},
+		Detect: func(workDir string) bool {
+			for _, cfg := range []string{".eslintrc.js", ".eslintrc.json", ".eslintrc.yml", "eslint.config.js", "eslint.config.mjs"} {
+				if _, err := os.Stat(filepath.Join(workDir, cfg)); err == nil {
+					return true
+				}
+			}
+			return false
+		},
+		Command: func(workDir string) (string, []string) {
+			if _, err := os.Stat(filepath.Join(workDir, "node_modules", ".bin", "eslint")); err == nil {
+				return "npx", []string{"eslint", "--format", "unix", "--quiet", "."}
+			}
+			if _, err := exec.LookPath("eslint"); err == nil {
+				return "eslint", []string{"--format", "unix", "--quiet", "."}
+			}
+			return "", nil
+		},
+		Parse: parseEslintUnixOutput,
+	},
+	{
 		Name:       "Python",
 		Extensions: []string{".py"},
 		Detect: func(workDir string) bool {
 			_, err := exec.LookPath("pyright")
+			if err == nil {
+				return true
+			}
+			_, err = exec.LookPath("mypy")
 			return err == nil
 		},
 		Command: func(workDir string) (string, []string) {
-			return "pyright", []string{"--outputjson"}
+			if _, err := exec.LookPath("pyright"); err == nil {
+				return "pyright", []string{"--outputjson"}
+			}
+			if _, err := exec.LookPath("mypy"); err == nil {
+				return "mypy", []string{"--no-color-output", "--no-error-summary"}
+			}
+			return "", nil
 		},
-		Parse: parsePyrightOutput,
+		Parse: parsePythonOutput,
+	},
+	{
+		Name:       "Rust",
+		Extensions: []string{".rs"},
+		Detect: func(workDir string) bool {
+			_, err := os.Stat(filepath.Join(workDir, "Cargo.toml"))
+			return err == nil
+		},
+		Command: func(workDir string) (string, []string) {
+			return "cargo", []string{"check", "--message-format=short", "2>&1"}
+		},
+		Parse: parseCargoOutput,
 	},
 }
 
@@ -252,6 +307,101 @@ func parsePyrightOutput(output string) []Diagnostic {
 			Severity: severity,
 			Message:  d.Message,
 		})
+	}
+	return diags
+}
+
+// eslint unix format: "file.ts:line:col: message [severity/rule]"
+var eslintUnixRegex = regexp.MustCompile(`^(.+):(\d+):(\d+):\s*(.+?)(?:\s*\[(\w+)/\w+\])?$`)
+
+func parseEslintUnixOutput(output string) []Diagnostic {
+	var diags []Diagnostic
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if m := eslintUnixRegex.FindStringSubmatch(line); m != nil {
+			lineNo, _ := strconv.Atoi(m[2])
+			colNo, _ := strconv.Atoi(m[3])
+			severity := "warning"
+			if m[5] == "Error" || m[5] == "error" {
+				severity = "error"
+			}
+			diags = append(diags, Diagnostic{
+				File:     m[1],
+				Line:     lineNo,
+				Column:   colNo,
+				Severity: severity,
+				Message:  m[4],
+			})
+		}
+	}
+	return diags
+}
+
+// parsePythonOutput handles both pyright JSON and mypy text output.
+func parsePythonOutput(output string) []Diagnostic {
+	// Try pyright JSON first
+	if diags := parsePyrightOutput(output); len(diags) > 0 {
+		return diags
+	}
+	// Fall back to mypy format: "file.py:line: error: message"
+	return parseMypyOutput(output)
+}
+
+var mypyRegex = regexp.MustCompile(`^(.+\.py):(\d+):\s*(error|warning|note):\s*(.+)$`)
+
+func parseMypyOutput(output string) []Diagnostic {
+	var diags []Diagnostic
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if m := mypyRegex.FindStringSubmatch(line); m != nil {
+			lineNo, _ := strconv.Atoi(m[2])
+			severity := m[3]
+			if severity == "note" {
+				continue // skip notes
+			}
+			diags = append(diags, Diagnostic{
+				File:     m[1],
+				Line:     lineNo,
+				Column:   0,
+				Severity: severity,
+				Message:  m[4],
+			})
+		}
+	}
+	return diags
+}
+
+// cargo check --message-format=short: "error[E0308]: file.rs:10:5: message"
+var cargoRegex = regexp.MustCompile(`^(error|warning)(?:\[E\d+\])?:\s*(.+)$`)
+var cargoLocRegex = regexp.MustCompile(`^\s*--> (.+):(\d+):(\d+)$`)
+
+func parseCargoOutput(output string) []Diagnostic {
+	var diags []Diagnostic
+	var currentSeverity, currentMessage string
+
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+
+		// Match error/warning header
+		if m := cargoRegex.FindStringSubmatch(line); m != nil {
+			currentSeverity = m[1]
+			currentMessage = m[2]
+			continue
+		}
+
+		// Match location line
+		if m := cargoLocRegex.FindStringSubmatch(line); m != nil && currentMessage != "" {
+			lineNo, _ := strconv.Atoi(m[2])
+			colNo, _ := strconv.Atoi(m[3])
+			diags = append(diags, Diagnostic{
+				File:     m[1],
+				Line:     lineNo,
+				Column:   colNo,
+				Severity: currentSeverity,
+				Message:  currentMessage,
+			})
+			currentMessage = ""
+		}
 	}
 	return diags
 }

@@ -90,7 +90,7 @@ func (nm *notifyManager) Render(width int) string {
 		return ""
 	}
 
-	innerW := width - 4
+	innerW := width - 2
 	if innerW < 20 {
 		innerW = 20
 	}
@@ -127,10 +127,16 @@ func (nm *notifyManager) renderOne(n Notification, width int) string {
 
 	icon := nm.icon(n.Type)
 	text := n.Text
-	if lipgloss.Width(text) > width-10 {
+	// Only truncate if text is really too long — give it most of the terminal width.
+	// Progress messages (narration, status) should have room to breathe.
+	maxTextW := width - 4 // icon + padding
+	if maxTextW < 20 {
+		maxTextW = 20
+	}
+	if lipgloss.Width(text) > maxTextW {
 		runes := []rune(text)
-		if len(runes) > width-13 {
-			text = string(runes[:width-13]) + "..."
+		if len(runes) > maxTextW-3 {
+			text = string(runes[:maxTextW-3]) + "..."
 		}
 	}
 

@@ -77,19 +77,15 @@ var plasmaPalette [256]rgb
 func init() {
 	for i := 0; i < 256; i++ {
 		t := float64(i) / 256.0
-		r := math.Sin(t*math.Pi*2)*0.5 + 0.5
-		g := math.Sin(t*math.Pi*2+2.094)*0.5 + 0.5
-		b := math.Sin(t*math.Pi*2+4.189)*0.5 + 0.5
-		// Desaturate: pull toward average
-		avg := (r + g + b) / 3.0
-		r = avg + (r-avg)*0.6
-		g = avg + (g-avg)*0.6
-		b = avg + (b-avg)*0.6
-		// Darker overall
+		// Dark cyber palette — teal/blue/purple, no bright colors
+		r := math.Sin(t*math.Pi*2+4.0)*0.3 + 0.2
+		g := math.Sin(t*math.Pi*2+2.5)*0.4 + 0.3
+		b := math.Sin(t*math.Pi*2)*0.5 + 0.5
+		// Very dark — this is a background, not a light show
 		plasmaPalette[i] = rgb{
-			clampU8(r * 90),
-			clampU8(g * 90),
-			clampU8(b * 90),
+			clampU8(r * 45),
+			clampU8(g * 55),
+			clampU8(b * 70),
 		}
 	}
 }
@@ -128,12 +124,13 @@ var glyphMap = map[rune][7]uint8{
 // ── Boot model ───────────────────────────────────────────────
 
 // Demo phases (frame-based, at 20fps / 50ms per frame)
+// Toned down: faster boot, cube appears immediately, no logo assembly delay
 const (
-	phPlasmaOnly   = 0   // frames 0-19:   just plasma (1s)
-	phLogoAppear   = 20  // frames 20-49:  logo assembles pixel by pixel (1.5s)
-	phTextAppear   = 50  // frames 50-64:  "codebase" text types in (0.75s)
-	phCubeAppear   = 55  // frames 55+:    cube fades in (1s)
-	phStepsStart   = 50  // frames 50+:    boot steps begin appearing
+	phPlasmaOnly   = 0   // frames 0-4:    just plasma (0.25s)
+	phLogoAppear   = 5   // frames 5-14:   logo assembles fast (0.5s)
+	phTextAppear   = 15  // frames 15-19:  "codebase" text types in (0.25s)
+	phCubeAppear   = 5   // frames 5+:     cube appears with plasma
+	phStepsStart   = 15  // frames 15+:    boot steps begin appearing
 )
 
 type bootModel struct {
@@ -192,7 +189,7 @@ func buildBootSteps(cfg *Config) []bootStep {
 	}
 	proto := detectProtocol(cfg.BaseURL)
 	protoLabel := "chat completions"
-	if proto == ProtocolAnthropic {
+	if proto == ProtocolMessages {
 		protoLabel = "messages api"
 	}
 	return []bootStep{
@@ -215,12 +212,11 @@ func (m bootModel) Init() tea.Cmd {
 	fps := demoFPS()
 	return tea.Batch(
 		func() tea.Msg {
-			// Start boot music in background (nil if no audio device)
 			return bootAudioMsg{player: StartBootMusic()}
 		},
 		tea.Tick(fps, func(t time.Time) tea.Msg { return demoTickMsg(t) }),
-		// First boot step after 2.5 seconds
-		tea.Tick(2500*time.Millisecond, func(t time.Time) tea.Msg { return bootTickMsg{} }),
+		// First boot step after 0.8 seconds — faster boot
+		tea.Tick(800*time.Millisecond, func(t time.Time) tea.Msg { return bootTickMsg{} }),
 	)
 }
 
@@ -244,11 +240,11 @@ func (m bootModel) Update(msg tea.Msg) (bootModel, tea.Cmd) {
 		}
 		if m.current >= len(m.steps) {
 			m.done = true
-			return m, tea.Tick(1200*time.Millisecond, func(t time.Time) tea.Msg {
+			return m, tea.Tick(600*time.Millisecond, func(t time.Time) tea.Msg {
 				return bootDoneMsg{}
 			})
 		}
-		return m, tea.Tick(500*time.Millisecond, func(t time.Time) tea.Msg { return bootTickMsg{} })
+		return m, tea.Tick(250*time.Millisecond, func(t time.Time) tea.Msg { return bootTickMsg{} })
 
 	case tea.KeyMsg:
 		switch msg.String() {
@@ -284,39 +280,30 @@ func (m bootModel) View() string {
 	m.renderCopperBars(px, w, h, t)
 	m.renderScanlines(px, w, h)
 
-	// ── Phase: Logo assembles ────────────────────────────────
-	if m.frame >= phLogoAppear {
-		logoScale := max(3, min(h/14, w/20))
-		logoPxW := logoW * logoScale
-		logoPxH := logoH * logoScale
-		logoX := (w - logoPxW) / 2
-		logoY := (h-logoPxH)/2 - int(float64(h)*0.18)
-
-		// Reveal progress: 0.0 → 1.0 over the logo-appear phase
-		reveal := math.Min(1.0, float64(m.frame-phLogoAppear)/40.0)
-		m.renderLogo(px, w, h, logoX, logoY, logoScale, t, reveal)
-
-		// ── Phase: "codebase" text types in ──────────────────
-		if m.frame >= phTextAppear {
-			textScale := max(1, logoScale/3)
-			titleText := "codebase"
-			charsVisible := min(len(titleText), (m.frame-phTextAppear)/3+1)
-			visibleText := titleText[:charsVisible]
-
-			glyphAdv := (5 + 2) * textScale
-			fullW := len(titleText)*glyphAdv - 2*textScale
-			textX := (w-fullW)/2 + 1
-			textY := logoY + logoPxH + logoScale*3
-			m.renderBitmapText(px, w, h, textX, textY, textScale, visibleText, t)
+	// ── Phase: "codebase" text types in (no logo blob) ──────
+	if m.frame >= phTextAppear {
+		textScale := max(1, min(h/20, w/60))
+		if textScale < 1 {
+			textScale = 1
 		}
+		titleText := "codebase"
+		charsVisible := min(len(titleText), (m.frame-phTextAppear)/2+1)
+		visibleText := titleText[:charsVisible]
+
+		glyphAdv := (5 + 2) * textScale
+		fullW := len(titleText)*glyphAdv - 2*textScale
+		textX := (w - fullW) / 2
+		textY := h/2 - 4*textScale
+		m.renderBitmapText(px, w, h, textX, textY, textScale, visibleText, t)
 	}
 
 	// ── Phase: 3D cube spins in ──────────────────────────────
+	// 3D cube — bigger, more centered, faster grow-in. The hero element.
 	if m.frame >= phCubeAppear {
-		cubeSize := float64(min(w, h)) * 0.14
-		cubeCX := float64(w) * 0.78
-		cubeCY := float64(h) * 0.35
-		growT := math.Min(1.0, float64(m.frame-phCubeAppear)/30.0)
+		cubeSize := float64(min(w, h)) * 0.22
+		cubeCX := float64(w) * 0.72
+		cubeCY := float64(h) * 0.38
+		growT := math.Min(1.0, float64(m.frame-phCubeAppear)/15.0) // faster grow-in
 		m.renderCube(px, w, h, cubeCX, cubeCY, cubeSize*growT, t)
 	}
 
@@ -350,14 +337,14 @@ func (m bootModel) renderPlasma(px []rgb, w, h int, t float64) {
 // ── Copper bars ──────────────────────────────────────────────
 
 func (m bootModel) renderCopperBars(px []rgb, w, h int, t float64) {
-	barDefs := [3][5]float64{
-		{0.6, 0.0, 1.4, 0.5, 0.15},
-		{0.45, 2.2, 0.2, 0.6, 1.6},
-		{0.8, 4.5, 1.2, 0.15, 1.0},
+	// Subtle dark bars — teal/cyan glow, very understated
+	barDefs := [2][5]float64{
+		{0.4, 0.0, 0.1, 0.5, 0.8},  // teal bar
+		{0.3, 3.0, 0.3, 0.2, 0.7},  // blue bar
 	}
-	barWidth := math.Max(6, float64(h)*0.07)
+	barWidth := math.Max(8, float64(h)*0.08)
 	for _, bar := range barDefs {
-		cy := math.Sin(t*bar[0]+bar[1])*float64(h)*0.35 + float64(h)*0.5
+		cy := math.Sin(t*bar[0]+bar[1])*float64(h)*0.3 + float64(h)*0.5
 		for py := int(cy - barWidth*2); py <= int(cy+barWidth*2); py++ {
 			if py < 0 || py >= h {
 				continue
@@ -365,7 +352,7 @@ func (m bootModel) renderCopperBars(px []rgb, w, h int, t float64) {
 			dist := math.Abs(float64(py) - cy)
 			inten := math.Max(0, 1.0-dist/barWidth)
 			inten = inten * inten * inten
-			boost := inten * 60 // subdued copper bars
+			boost := inten * 30 // very subtle
 			for ppx := 0; ppx < w; ppx++ {
 				p := &px[py*w+ppx]
 				p.r = clampU8(float64(p.r) + boost*bar[2])
@@ -416,21 +403,23 @@ func (m bootModel) renderCube(px []rgb, w, h int, cx, cy, size, t float64) {
 		depth[i] = rz2
 	}
 
+	// Wireframe edges — bright cyan/green for that hacker terminal look
 	for _, e := range cubeEdges {
 		a, b := proj[e[0]], proj[e[1]]
 		avgZ := (depth[e[0]] + depth[e[1]]) / 2.0
-		bright := math.Max(0.35, math.Min(1.0, 0.6+avgZ*0.2))
-		col := rgb{clampU8(bright * 100), clampU8(bright * 235), clampU8(bright * 255)}
+		bright := math.Max(0.4, math.Min(1.0, 0.65+avgZ*0.25))
+		col := rgb{clampU8(bright * 30), clampU8(bright * 220), clampU8(bright * 200)}
 		drawLine(px, w, h, int(a.x), int(a.y), int(b.x), int(b.y), col)
 	}
 
+	// Bright vertex dots — the polygon anchor points
 	for _, p := range proj {
 		ix, iy := int(p.x), int(p.y)
 		for dy := -1; dy <= 1; dy++ {
 			for dx := -1; dx <= 1; dx++ {
 				x, y := ix+dx, iy+dy
 				if x >= 0 && x < w && y >= 0 && y < h {
-					px[y*w+x] = rgb{200, 250, 255}
+					px[y*w+x] = rgb{100, 255, 230}
 				}
 			}
 		}
@@ -513,12 +502,12 @@ func (m bootModel) renderLogo(px []rgb, w, h, ox, oy, scale int, t, reveal float
 				continue
 			}
 
-			// Cool white-blue logo
+			// Teal/cyan logo — matches the wireframe cube aesthetic
 			_ = t
 			blend := float64(ly) / float64(logoH)
-			cr := clampU8(200 + blend*55)
-			cg := clampU8(210 + blend*45)
-			cb := uint8(255)
+			cr := clampU8(40 + blend*30)
+			cg := clampU8(200 + blend*55)
+			cb := clampU8(180 + blend*50)
 
 			for dy := 0; dy < scale; dy++ {
 				for dx := 0; dx < scale; dx++ {
@@ -573,10 +562,10 @@ func (m bootModel) renderBitmapText(px []rgb, w, h, ox, oy, scale int, text stri
 				if bits&(1<<(4-col)) == 0 {
 					continue
 				}
-				// Soft white text
+				// Muted teal text — matches the wireframe aesthetic
 				_ = t
 				_ = ci
-				cr, cg, cb := uint8(200), uint8(210), uint8(225)
+				cr, cg, cb := uint8(60), uint8(190), uint8(175)
 				for dy := 0; dy < scale; dy++ {
 					for dx := 0; dx < scale; dx++ {
 						x := gx + col*scale + dx
@@ -643,9 +632,9 @@ func (m bootModel) renderBootInfo(px []rgb, w, h int, t float64) {
 			}
 			var cr, cg, cb uint8
 			if ch == '.' || ch == '/' || ch == '-' || ch == '\\' || ch == '|' {
-				cr, cg, cb = 80, 95, 110
+				cr, cg, cb = 50, 70, 80
 			} else {
-				cr, cg, cb = 210, 220, 235
+				cr, cg, cb = 140, 180, 170
 			}
 			for dy := 0; dy < 2; dy++ {
 				y := baseY + dy

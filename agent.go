@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/codebase-foundation/cli/internal/tool"
 )
 
 // ──────────────────────────────────────────────────────────────
@@ -55,75 +57,106 @@ type AgentEvent struct {
 
 const maxTurns = 30
 const maxConsecutiveErrors = 5
+const maxOutputTokensRecoveryLimit = 3
 
-const systemPrompt = `You are Codebase, a local AI coding agent running in the user's terminal.
-You have direct access to their filesystem and shell. You help them build,
+// systemPromptCore is the static portion of the system prompt.
+// Tool descriptions are auto-generated from the registry at runtime —
+// adding a tool automatically updates the prompt. Zero maintenance.
+const systemPromptCore = `You are Codebase, an AI coding agent running in the user's terminal.
+You have direct access to their filesystem, shell, and git. You help them build,
 debug, and modify software projects.
 
-Available tools:
-- read_file: Read file contents with line numbers. Use offset/limit for large files.
-- write_file: Create or overwrite a file. Parent directories are created automatically.
-- edit_file: Surgical find-and-replace in a file. old_text must match exactly and be unique. If old_text is not found, re-read the file and check for exact whitespace and line endings.
-- multi_edit: Batch multiple edits across files. Per-file atomicity with rollback.
-- list_files: List directory contents or glob for files (e.g. "**/*.go").
-- search_files: Regex search across files (powered by ripgrep). Find definitions, usages, etc.
-- web_search: Search the web. Use for current info, docs, versions, error solutions, or anything not in local files.
-- dispatch_agent: Spawn a read-only research subagent to investigate questions in isolated context.
-- shell: Run a shell command. Use for builds, tests, package management, and any terminal task.
-- git_status: Show working tree status (staged, unstaged, untracked files).
-- git_diff: Show file diffs (staged, unstaged, or between refs).
-- git_log: Show recent commit history.
-- git_commit: Stage files and create a commit.
-- git_branch: List, create, or switch branches.
-- create_task: Create a task to track progress. The user sees these as a live checklist.
-- update_task: Update task status (pending → in_progress → completed).
-- list_tasks: List all tasks with status.
-- get_task: Get full details of a specific task.
+# Using tools
 
-Guidelines:
-- ALWAYS read a file before editing it — never guess at file contents
-- ALWAYS use search_files or list_files to explore before assuming project structure
-- You can call multiple tools in parallel — read_file, list_files, search_files, web_search, dispatch_agent, list_tasks, and get_task all run concurrently
-- Make targeted, minimal changes — don't rewrite entire files unnecessarily
-- For multiple related edits, prefer multi_edit over separate edit_file calls
-- Use git tools instead of shell for git operations — they provide structured output
-- After you edit files, the system may report diagnostics (errors, warnings) from language tools. If diagnostics appear, fix the issues before moving on
-- When finished, briefly summarize what you changed and why
+Use the right tool for the job — don't reach for shell when a dedicated tool exists:
+- To read files: use read_file, NOT shell with cat/head/tail
+- To search code: use grep or search_files, NOT shell with grep/rg
+- To find files: use glob or list_files, NOT shell with find/ls
+- To edit files: use edit_file or multi_edit, NOT shell with sed/awk
+- To create files: use write_file, NOT shell with echo/cat heredoc
+- For git operations: use git_status/diff/log/commit/branch, NOT shell with git
 
-Error recovery:
-- If edit_file fails with "old_text not found", re-read the file to see the actual content, then retry with corrected text
-- If edit_file fails with "found N times", add more surrounding context lines to old_text to make it unique
-- If a shell command fails, read the error output carefully and try a different approach
+Use shell for: builds, tests, package management, running programs, and anything that isn't covered by a dedicated tool.
+
+IMPORTANT: Call multiple tools in a single response whenever possible. All read-only tools run in parallel automatically — the more you call at once, the faster you go:
+- Need to understand a feature? Call read_file on 3-5 relevant files simultaneously, not one at a time.
+- Need to find something? Call grep + glob + list_files in the same response.
+- Need context? Call git_log + git_diff + read_file together.
+
+Do NOT use dispatch_agent for simple research that you can do directly with parallel tool calls. dispatch_agent is for deep isolated investigations that need their own conversation context. For most questions, direct parallel reads are faster.
+
+# Core principles
+
+1. **Maximize parallelism** — call as many read-only tools as you need in a single response. They all run concurrently.
+2. **Read before write** — ALWAYS read a file before editing it. Never guess at contents.
+3. **Explore before assuming** — use glob/grep/list_files to understand project structure first.
+4. **Minimal changes** — make targeted edits, don't rewrite entire files unless asked.
+5. **Batch related edits** — use multi_edit for 2+ related changes across files.
+6. **Verify your work** — after edits, run the build/tests if a command exists for them.
+
+# Reversibility and safety
+
+Consider the reversibility and blast radius of every action:
+- **Freely do**: read files, search, list, run tests, create new files
+- **Do with care**: edit existing files, run shell commands that modify state
+- **Ask first**: delete files, force-push, drop databases, run destructive commands
+- If you're unsure whether something is destructive, use ask_user to confirm
+
+# Error recovery
+
+- If edit_file fails with "old_text not found" → re-read the file, then retry with the correct text
+- If edit_file fails with "found N times" → add more surrounding context to make old_text unique
+- If shell fails → read the error carefully, diagnose the root cause, try a different approach
 - Never repeat a failed tool call with identical arguments
+- If you're stuck after 2-3 attempts, explain the problem to the user instead of looping
 
-Task management:
-- For multi-step work (3+ steps), create tasks upfront so the user can track progress
-- Set status to "in_progress" BEFORE starting work on a task
-- Set status to "completed" only when fully done — not when partially done
-- Keep task subjects short and imperative (e.g. "Add auth middleware")
-- Provide active_form in present continuous (e.g. "Adding auth middleware") — it shows in the spinner
-- For simple or single-step tasks, skip task creation — just do the work directly`
+# Output style
+
+- Be concise. Lead with the action, not the reasoning.
+- Don't restate what the user said — just do it.
+- When referencing code, include file_path:line_number for easy navigation.
+- After completing work, briefly summarize what changed and why.
+- Don't add features, refactor code, or "improve" things beyond what was asked.
+
+# Task tracking
+
+- For multi-step work (3+ steps), create tasks so the user can track progress
+- Set status to "in_progress" BEFORE starting, "completed" only when fully done
+- Keep subjects short and imperative (e.g. "Add auth middleware")
+- For simple tasks, skip task creation — just do the work
+
+# Planning
+
+- For complex tasks, use enter_plan_mode to read and explore before coding
+- Use ask_user when requirements are ambiguous or there are multiple valid approaches
+- Use dispatch_agent for research questions that need isolated deep-dives`
 
 type Agent struct {
-	client    *LLMClient
-	workDir   string
-	history   []ChatMessage
-	events    chan<- AgentEvent
-	stopCh    <-chan struct{}
-	files     int // count of files created/modified
-	permCh    chan PermissionResponse
-	permState *PermissionState
-	diag      *DiagnosticsEngine
-	tasks     *TaskStore
+	client      *LLMClient
+	workDir     string
+	history     []ChatMessage
+	events      chan<- AgentEvent
+	stopCh      <-chan struct{}
+	files       int // count of files created/modified
+	permCh      chan PermissionResponse
+	permState   *PermissionState
+	diag        *DiagnosticsEngine
+	tasks       *TaskStore
+	hooks       *HooksEngine
+	fileHistory *FileHistory
+	glue        *GlueClient
 }
 
-func NewAgent(client *LLMClient, workDir string, events chan<- AgentEvent, stopCh <-chan struct{}, tasks *TaskStore) *Agent {
+func NewAgent(client *LLMClient, workDir string, events chan<- AgentEvent, stopCh <-chan struct{}, tasks *TaskStore, glue *GlueClient) *Agent {
 	sysContent := buildSystemPrompt(workDir)
 	return &Agent{
-		client:  client,
-		workDir: workDir,
-		events:  events,
-		stopCh:  stopCh,
+		client:      client,
+		workDir:     workDir,
+		events:      events,
+		stopCh:      stopCh,
+		hooks:       NewHooksEngine(workDir),
+		fileHistory: NewFileHistory(),
+		glue:        glue,
 		history: []ChatMessage{
 			{Role: "system", Content: strPtr(sysContent)},
 		},
@@ -137,9 +170,22 @@ func NewAgent(client *LLMClient, workDir string, events chan<- AgentEvent, stopC
 func strPtr(s string) *string { return &s }
 
 // buildSystemPrompt assembles the system prompt with project context.
+// Tool descriptions are auto-generated from the registry — adding a tool
+// to RegisterAll() automatically includes it in the system prompt.
 func buildSystemPrompt(workDir string) string {
 	var sb strings.Builder
-	sb.WriteString(systemPrompt)
+	sb.WriteString(systemPromptCore)
+
+	// Auto-generate tool list from registry
+	sb.WriteString("\n\n# Available tools\n\n")
+	for _, t := range globalRegistry.All() {
+		desc := t.Description()
+		// Truncate very long descriptions for the system prompt
+		if len(desc) > 200 {
+			desc = desc[:197] + "..."
+		}
+		fmt.Fprintf(&sb, "- **%s**: %s\n", t.Name(), desc)
+	}
 
 	// Environment context
 	sb.WriteString("\n\n## Environment\n\n")
@@ -157,6 +203,9 @@ func buildSystemPrompt(workDir string) string {
 	if runtime.GOOS == "windows" {
 		sb.WriteString("\nShell commands run in PowerShell. Use PowerShell syntax (e.g. `Get-ChildItem` not `ls`, `Remove-Item` not `rm`, `;` or `&&` to chain commands).\n")
 	}
+
+	// Inject cross-session memory
+	injectMemoryContext(&sb, workDir)
 
 	// Load project instructions if available
 	projectInstructions := loadProjectInstructions(workDir)
@@ -298,6 +347,8 @@ func (a *Agent) Run(prompt string) {
 	})
 
 	consecutiveErrors := 0
+	outputTokenRecoveries := 0
+	compactionFailures := 0
 
 	for turn := 1; turn <= maxTurns; turn++ {
 		// Check for stop signal
@@ -308,17 +359,28 @@ func (a *Agent) Run(prompt string) {
 		default:
 		}
 
-		// Check if compaction is needed before the LLM call
+		// Proactive compaction — before the LLM call, not after it fails
 		if needsCompaction(a.history, a.client.Model) {
 			compacted, ok := compactHistory(a.client, a.history)
 			if ok {
 				a.history = compacted
+				compactionFailures = 0
+			} else {
+				compactionFailures++
+				// Circuit breaker: stop trying after 3 failures
+				if compactionFailures >= 3 {
+					a.events <- AgentEvent{Type: EventError,
+						Error: fmt.Errorf("compaction failed %d times — context may be too large", compactionFailures)}
+				}
 			}
 		}
 
 		a.events <- AgentEvent{Type: EventTurnStart, Turn: turn}
 
-		// Stream LLM call with context derived from stopCh
+		debugLog("turn %d: streaming LLM call (model=%s, protocol=%s, base=%s, history=%d msgs)",
+			turn, a.client.Model, a.client.Protocol, a.client.BaseURL, len(a.history))
+
+		// Stream LLM call
 		ctx, cancel := context.WithCancel(context.Background())
 		go func() {
 			select {
@@ -328,14 +390,18 @@ func (a *Agent) Run(prompt string) {
 			}
 		}()
 		streamCh := make(chan StreamEvent, 64)
-		go a.client.StreamChat(ctx, a.history, toolDefs, streamCh)
+		go a.client.StreamChat(ctx, a.history, allToolDefs(), streamCh)
 
 		var textContent strings.Builder
 		var toolCalls []ToolCall
 		var lastUsage ChunkUsage
+		var streamErr error
+
+		// Streaming executor: starts tool execution as soon as tool calls
+		// arrive, while the model may still be streaming more output.
+		var executor *StreamingExecutor
 
 		for evt := range streamCh {
-			// Check stop between stream events
 			select {
 			case <-a.stopCh:
 				cancel()
@@ -351,6 +417,23 @@ func (a *Agent) Run(prompt string) {
 
 			case StreamToolCalls:
 				toolCalls = evt.ToolCalls
+				debugLog("stream: received %d tool calls", len(evt.ToolCalls))
+				for _, tc := range evt.ToolCalls {
+					debugLog("  tool_call: %s (id=%s)", tc.Function.Name, tc.ID)
+				}
+				// Start streaming execution immediately for read-only tools
+				if executor == nil {
+					executor = NewStreamingExecutor(a.toolEnv(), a.events)
+				}
+				for _, tc := range evt.ToolCalls {
+					// Only auto-execute concurrency-safe tools during streaming.
+					// Non-safe tools need permission checks — defer to batch execution.
+					var argsMap map[string]any
+					json.Unmarshal([]byte(tc.Function.Arguments), &argsMap)
+					if registryIsParallelSafe(tc.Function.Name, argsMap) && !NeedsPermission(tc.Function.Name, argsMap) {
+						executor.Submit(tc)
+					}
+				}
 
 			case StreamUsage:
 				lastUsage = evt.Usage
@@ -360,20 +443,85 @@ func (a *Agent) Run(prompt string) {
 				}
 
 			case StreamError:
-				cancel()
-				a.events <- AgentEvent{Type: EventError, Error: fmt.Errorf("%s", humanizeError(evt.Error))}
-				a.events <- AgentEvent{Type: EventDone, Text: "Error occurred."}
-				return
+				debugLog("stream: ERROR: %v", evt.Error)
+				streamErr = evt.Error
 
 			case StreamDone:
 				// handled below
 			}
 		}
-		cancel() // ensure context goroutine exits
+		cancel()
+
+		// Wait for any streaming tool executions to complete
+		if executor != nil {
+			executor.Wait()
+		}
 
 		_ = lastUsage
 
-		// Build assistant message for history
+		// ── Error recovery ──────────────────────────────────
+		if streamErr != nil {
+			errMsg := streamErr.Error()
+			recovered := false
+
+			// Recovery: prompt too long → reactive compact
+			if isContextTooLongError(errMsg) {
+				a.events <- AgentEvent{Type: EventError,
+					Error: fmt.Errorf("context too long — attempting compaction")}
+
+				compacted, ok := compactHistory(a.client, a.history)
+				if ok {
+					a.history = compacted
+					a.events <- AgentEvent{Type: EventError,
+						Error: fmt.Errorf("compacted context, retrying")}
+					recovered = true
+				}
+			}
+
+			// Recovery: max output tokens → inject resume message
+			if isMaxOutputTokensError(errMsg) && outputTokenRecoveries < maxOutputTokensRecoveryLimit {
+				outputTokenRecoveries++
+				// Save what we got so far
+				if textContent.Len() > 0 {
+					a.history = append(a.history, ChatMessage{
+						Role:    "assistant",
+						Content: strPtr(textContent.String()),
+					})
+				}
+				// Inject recovery message
+				a.history = append(a.history, ChatMessage{
+					Role:    "user",
+					Content: strPtr("Output limit reached. Resume directly — no apology, no recap. Pick up exactly where you left off. If you were mid-code, continue the code. Break remaining work into smaller pieces."),
+				})
+				a.events <- AgentEvent{Type: EventError,
+					Error: fmt.Errorf("output limit hit, resuming (attempt %d/%d)", outputTokenRecoveries, maxOutputTokensRecoveryLimit)}
+				recovered = true
+			}
+
+			// Recovery: rate limit → wait and retry
+			if isRateLimitError(errMsg) {
+				backoff := time.Duration(1<<uint(min(consecutiveErrors, 4))) * time.Second
+				a.events <- AgentEvent{Type: EventError,
+					Error: fmt.Errorf("rate limited — waiting %s before retry", backoff)}
+				time.Sleep(backoff)
+				recovered = true
+			}
+
+			if recovered {
+				continue // retry this turn
+			}
+
+			// Unrecoverable error
+			a.events <- AgentEvent{Type: EventError, Error: fmt.Errorf("%s", humanizeError(streamErr))}
+			a.events <- AgentEvent{Type: EventDone, Text: "Error occurred."}
+			return
+		}
+
+		// Reset recovery counter on successful response
+		outputTokenRecoveries = 0
+
+		// ── Process response ────────────────────────────────
+
 		assistantMsg := ChatMessage{Role: "assistant"}
 		txt := textContent.String()
 		if txt != "" {
@@ -390,123 +538,213 @@ func (a *Agent) Run(prompt string) {
 			return
 		}
 
-		// Execute tool calls — parallel for read-only, sequential for mutations
-		a.executeToolCalls(toolCalls, &consecutiveErrors)
+		// Collect results from streaming executor (tools already executed)
+		executedIDs := make(map[string]bool)
+		if executor != nil {
+			for _, r := range executor.Results() {
+				executedIDs[r.tc.ID] = true
+				a.history = append(a.history, ChatMessage{
+					Role: "tool", ToolCallID: r.tc.ID, Name: r.tc.Function.Name, Content: strPtr(r.output),
+				})
+			}
+			if executor.HasErrors() {
+				consecutiveErrors++
+			} else if len(executor.Results()) > 0 {
+				consecutiveErrors = 0
+			}
+		}
+
+		// Execute remaining tool calls (those not handled by streaming executor)
+		var remaining []ToolCall
+		for _, tc := range toolCalls {
+			if !executedIDs[tc.ID] {
+				remaining = append(remaining, tc)
+			}
+		}
+		if len(remaining) > 0 {
+			a.executeToolCalls(remaining, &consecutiveErrors)
+		}
 
 		if consecutiveErrors >= maxConsecutiveErrors {
 			a.events <- AgentEvent{
-				Type: EventError,
+				Type:  EventError,
 				Error: fmt.Errorf("too many consecutive tool errors (%d), stopping", consecutiveErrors),
 			}
 			a.events <- AgentEvent{Type: EventDone, Text: "Too many errors."}
 			return
 		}
-
-		// Loop back for next turn
 	}
 
 	a.events <- AgentEvent{Type: EventDone, Text: fmt.Sprintf("Reached maximum turns (%d). You can continue with a follow-up prompt.", maxTurns)}
 }
 
-// executeToolCalls runs tool calls with parallel execution for read-only tools.
-func (a *Agent) executeToolCalls(toolCalls []ToolCall, consecutiveErrors *int) {
-	// Classify tools
-	var parallel []ToolCall
-	var sequential []ToolCall
+// ── Error classification helpers ────────────────────────────
+
+func isContextTooLongError(msg string) bool {
+	lower := strings.ToLower(msg)
+	return strings.Contains(lower, "context_length_exceeded") ||
+		strings.Contains(lower, "prompt is too long") ||
+		strings.Contains(lower, "maximum context length") ||
+		strings.Contains(lower, "prompt too long") ||
+		strings.Contains(lower, "request too large")
+}
+
+func isMaxOutputTokensError(msg string) bool {
+	lower := strings.ToLower(msg)
+	return strings.Contains(lower, "max_tokens") ||
+		strings.Contains(lower, "maximum output") ||
+		strings.Contains(lower, "length limit") ||
+		strings.Contains(lower, "output token")
+}
+
+func isRateLimitError(msg string) bool {
+	lower := strings.ToLower(msg)
+	return strings.Contains(lower, "rate_limit") ||
+		strings.Contains(lower, "rate limit") ||
+		strings.Contains(lower, "429") ||
+		strings.Contains(lower, "too many requests")
+}
+
+// ──────────────────────────────────────────────────────────────
+//  Batch-partitioned tool execution
+//
+//  Consecutive concurrency-safe tools are grouped into parallel batches.
+//  Non-safe tools run serially, one at a time. This preserves ordering:
+//
+//    [read, read, WRITE, read, WRITE]
+//     → batch1(parallel: read, read)
+//     → batch2(serial: WRITE)
+//     → batch3(parallel: read)    ← sees WRITE's effects
+//     → batch4(serial: WRITE)
+//
+//  Concurrency safety is INPUT-DEPENDENT: the same tool can be safe
+//  for some args and unsafe for others (e.g. shell("ls") vs shell("rm")).
+// ──────────────────────────────────────────────────────────────
+
+type toolBatch struct {
+	parallel bool       // true = run all in parallel, false = run one at a time
+	calls    []ToolCall
+}
+
+// partitionToolCalls groups consecutive concurrency-safe tools into parallel
+// batches and non-safe tools into serial batches.
+func (a *Agent) partitionToolCalls(toolCalls []ToolCall) []toolBatch {
+	var batches []toolBatch
+
 	for _, tc := range toolCalls {
-		if IsParallelSafe(tc.Function.Name) {
-			parallel = append(parallel, tc)
+		var argsMap map[string]any
+		json.Unmarshal([]byte(tc.Function.Arguments), &argsMap)
+
+		safe := registryIsParallelSafe(tc.Function.Name, argsMap)
+
+		if safe && len(batches) > 0 && batches[len(batches)-1].parallel {
+			// Extend existing parallel batch
+			batches[len(batches)-1].calls = append(batches[len(batches)-1].calls, tc)
 		} else {
-			sequential = append(sequential, tc)
+			batches = append(batches, toolBatch{parallel: safe, calls: []ToolCall{tc}})
 		}
 	}
+	return batches
+}
 
+// executeToolCalls partitions tool calls into batches and executes them
+// with proper ordering: parallel batches run concurrently, serial batches
+// run one tool at a time.
+func (a *Agent) executeToolCalls(toolCalls []ToolCall, consecutiveErrors *int) {
+	batches := a.partitionToolCalls(toolCalls)
 	allErrors := true
 
-	// Run read-only tools in parallel
-	if len(parallel) > 0 {
-		type result struct {
-			tc      ToolCall
-			args    map[string]any
-			output  string
-			success bool
-		}
-		results := make([]result, len(parallel))
-		var wg sync.WaitGroup
-
-		for i, tc := range parallel {
-			var argsMap map[string]any
-			if err := json.Unmarshal([]byte(tc.Function.Arguments), &argsMap); err != nil {
-				argsMap = map[string]any{"_raw": tc.Function.Arguments}
-			}
-
-			a.events <- AgentEvent{
-				Type:   EventToolStart,
-				Tool:   tc.Function.Name,
-				ToolID: tc.ID,
-				Args:   argsMap,
-			}
-
-			wg.Add(1)
-			go func(idx int, tc ToolCall, args map[string]any) {
-				defer wg.Done()
-				var output string
-				var success bool
-				switch tc.Function.Name {
-				case "dispatch_agent":
-					task := ""
-					if args != nil {
-						task, _ = args["task"].(string)
-					}
-					res, err := RunSubagent(a.client, a.workDir, task)
-					if err != nil {
-						output = fmt.Sprintf("Subagent error: %v", err)
-						success = false
-					} else {
-						output = res
-						success = true
-					}
-				case "list_tasks":
-					output, success = toolListTasks(args, a.tasks)
-				case "get_task":
-					output, success = toolGetTask(args, a.tasks)
-				default:
-					output, success = ExecuteTool(tc.Function.Name, tc.Function.Arguments, a.workDir)
-				}
-				results[idx] = result{tc: tc, args: args, output: output, success: success}
-			}(i, tc, argsMap)
-		}
-
-		wg.Wait()
-
-		for _, r := range results {
-			if r.success {
-				allErrors = false
-			}
-
-			a.events <- AgentEvent{
-				Type:    EventToolResult,
-				Tool:    r.tc.Function.Name,
-				ToolID:  r.tc.ID,
-				Args:    r.args,
-				Output:  r.output,
-				Success: r.success,
-			}
-
-			a.history = append(a.history, ChatMessage{
-				Role:       "tool",
-				ToolCallID: r.tc.ID,
-				Name:       r.tc.Function.Name,
-				Content:    strPtr(r.output),
-			})
+	for _, batch := range batches {
+		if batch.parallel {
+			a.executeBatchParallel(batch.calls, &allErrors)
+		} else {
+			a.executeBatchSerial(batch.calls, &allErrors)
 		}
 	}
 
-	// Run mutating tools sequentially
-	for _, tc := range sequential {
+	if allErrors {
+		*consecutiveErrors++
+	} else {
+		*consecutiveErrors = 0
+	}
+}
+
+// executeBatchParallel runs all tools in the batch concurrently.
+func (a *Agent) executeBatchParallel(calls []ToolCall, allErrors *bool) {
+	type result struct {
+		tc      ToolCall
+		args    map[string]any
+		output  string
+		success bool
+	}
+	results := make([]result, len(calls))
+	var wg sync.WaitGroup
+
+	for i, tc := range calls {
 		var argsMap map[string]any
 		if err := json.Unmarshal([]byte(tc.Function.Arguments), &argsMap); err != nil {
 			argsMap = map[string]any{"_raw": tc.Function.Arguments}
+		}
+
+		a.events <- AgentEvent{
+			Type:   EventToolStart,
+			Tool:   tc.Function.Name,
+			ToolID: tc.ID,
+			Args:   argsMap,
+		}
+
+		wg.Add(1)
+		go func(idx int, tc ToolCall, args map[string]any) {
+			defer wg.Done()
+			output, success := a.dispatchTool(tc, args)
+			results[idx] = result{tc: tc, args: args, output: output, success: success}
+		}(i, tc, argsMap)
+	}
+
+	wg.Wait()
+
+	for _, r := range results {
+		if r.success {
+			*allErrors = false
+		}
+		a.events <- AgentEvent{
+			Type:    EventToolResult,
+			Tool:    r.tc.Function.Name,
+			ToolID:  r.tc.ID,
+			Args:    r.args,
+			Output:  r.output,
+			Success: r.success,
+		}
+		a.history = append(a.history, ChatMessage{
+			Role:       "tool",
+			ToolCallID: r.tc.ID,
+			Name:       r.tc.Function.Name,
+			Content:    strPtr(r.output),
+		})
+	}
+}
+
+// executeBatchSerial runs tools one at a time with permission checks.
+func (a *Agent) executeBatchSerial(calls []ToolCall, allErrors *bool) {
+	for _, tc := range calls {
+		var argsMap map[string]any
+		if err := json.Unmarshal([]byte(tc.Function.Arguments), &argsMap); err != nil {
+			argsMap = map[string]any{"_raw": tc.Function.Arguments}
+		}
+
+		// Run PreToolUse hooks — can block execution
+		if a.hooks != nil {
+			hookResult := a.hooks.Run(HookPreToolUse, HookInput{
+				ToolName:  tc.Function.Name,
+				ToolInput: argsMap,
+			})
+			if hookResult != nil && hookResult.Blocked {
+				output := fmt.Sprintf("Blocked by hook: %s", hookResult.Message)
+				a.events <- AgentEvent{Type: EventToolStart, Tool: tc.Function.Name, ToolID: tc.ID, Args: argsMap}
+				a.events <- AgentEvent{Type: EventToolResult, Tool: tc.Function.Name, ToolID: tc.ID, Args: argsMap, Output: output, Success: false}
+				a.history = append(a.history, ChatMessage{Role: "tool", ToolCallID: tc.ID, Name: tc.Function.Name, Content: strPtr(output)})
+				continue
+			}
 		}
 
 		// Check permission before executing
@@ -542,40 +780,38 @@ func (a *Agent) executeToolCalls(toolCalls []ToolCall, consecutiveErrors *int) {
 			Args:   argsMap,
 		}
 
-		var output string
-		var success bool
-		switch tc.Function.Name {
-		case "dispatch_agent":
-			task := ""
-			if argsMap != nil {
-				task, _ = argsMap["task"].(string)
-			}
-			res, err := RunSubagent(a.client, a.workDir, task)
-			if err != nil {
-				output = fmt.Sprintf("Subagent error: %v", err)
-				success = false
-			} else {
-				output = res
-				success = true
-			}
-		case "create_task":
-			output, success = toolCreateTask(argsMap, a.tasks)
-		case "update_task":
-			output, success = toolUpdateTask(argsMap, a.tasks)
-		case "list_tasks":
-			output, success = toolListTasks(argsMap, a.tasks)
-		case "get_task":
-			output, success = toolGetTask(argsMap, a.tasks)
-		default:
-			output, success = ExecuteTool(tc.Function.Name, tc.Function.Arguments, a.workDir)
-		}
+		output, success := a.dispatchTool(tc, argsMap)
 
 		if success {
-			allErrors = false
-			if tc.Function.Name == "write_file" || tc.Function.Name == "edit_file" || tc.Function.Name == "multi_edit" {
+			*allErrors = false
+			isFileEdit := tc.Function.Name == "write_file" || tc.Function.Name == "edit_file" || tc.Function.Name == "multi_edit"
+			if isFileEdit {
 				a.files++
 				a.maybeInjectDiagnostics(tc.Function.Name, argsMap)
+
+				// Run PostEdit hooks (e.g., auto-lint, auto-format)
+				if a.hooks != nil {
+					var editedFiles []string
+					if p, ok := argsMap["path"].(string); ok {
+						editedFiles = []string{p}
+					}
+					a.hooks.Run(HookPostEdit, HookInput{
+						ToolName:  tc.Function.Name,
+						ToolInput: argsMap,
+						Files:     editedFiles,
+						Output:    output,
+					})
+				}
 			}
+		}
+
+		// Run PostToolUse hooks
+		if a.hooks != nil {
+			a.hooks.Run(HookPostToolUse, HookInput{
+				ToolName:  tc.Function.Name,
+				ToolInput: argsMap,
+				Output:    output,
+			})
 		}
 
 		a.events <- AgentEvent{
@@ -594,17 +830,71 @@ func (a *Agent) executeToolCalls(toolCalls []ToolCall, consecutiveErrors *int) {
 			Content:    strPtr(output),
 		})
 	}
+}
 
-	if allErrors {
-		*consecutiveErrors++
-	} else {
-		*consecutiveErrors = 0
-	}
+// dispatchTool routes a tool call through the registry.
+// All tools go through the same path — no special cases.
+// Large outputs are automatically persisted to disk.
+func (a *Agent) dispatchTool(tc ToolCall, args map[string]any) (string, bool) {
+	debugLog("tool: %s (id=%s, args=%d bytes)", tc.Function.Name, tc.ID, len(tc.Function.Arguments))
+	result := registryExecute(context.Background(), tc.Function.Name, args, a.toolEnv())
+	output := maybePersistToolResult(tc.Function.Name, result.Output)
+	debugLog("tool: %s → success=%v, output=%d bytes", tc.Function.Name, result.Success, len(output))
+	return output, result.Success
 }
 
 // FilesChanged returns how many files the agent has created/modified.
 func (a *Agent) FilesChanged() int {
 	return a.files
+}
+
+// toolEnv constructs the Env passed to tools in the registry.
+func (a *Agent) toolEnv() *tool.Env {
+	return &tool.Env{
+		WorkDir:  a.workDir,
+		Turn:     0, // turn tracking is in chatModel, not agent
+		Subagent: &agentSubagentRunner{client: a.client, workDir: a.workDir},
+		Tasks:    a.tasks,
+		History:  a.fileHistory,
+		// Glue: wired when GlueClient implements tool.GlueRunner
+	}
+}
+
+// agentSubagentRunner adapts RunSubagentWithConfig to the tool.SubagentRunner interface.
+type agentSubagentRunner struct {
+	client  *LLMClient
+	workDir string
+}
+
+func (r *agentSubagentRunner) RunSubagent(task string) (string, error) {
+	// Parse enriched task format: __agent_config__:{json}\n{actual task}
+	cfg := SubagentConfig{
+		Task:      task,
+		AgentType: "explore",
+		Depth:     1,
+	}
+
+	if strings.HasPrefix(task, "__agent_config__:") {
+		parts := strings.SplitN(task, "\n", 2)
+		configStr := strings.TrimPrefix(parts[0], "__agent_config__:")
+		var config map[string]string
+		if err := json.Unmarshal([]byte(configStr), &config); err == nil {
+			if v := config["type"]; v != "" {
+				cfg.AgentType = v
+			}
+			if v := config["isolation"]; v != "" {
+				cfg.Isolation = v
+			}
+			if v := config["model"]; v != "" {
+				cfg.Model = v
+			}
+		}
+		if len(parts) > 1 {
+			cfg.Task = parts[1]
+		}
+	}
+
+	return RunSubagentWithConfig(r.client, r.workDir, cfg)
 }
 
 // maybeInjectDiagnostics runs language checkers after file modifications
@@ -670,12 +960,21 @@ func (a *Agent) checkPermission(toolName string, args map[string]any) bool {
 		return true
 	}
 
-	// Send permission request to TUI
+	// Build permission request with glue-powered explanation
 	req := &PermissionRequest{
 		Tool:    toolName,
 		Args:    args,
 		Summary: PermissionSummary(toolName, args),
 	}
+
+	// Use glue to explain the action and assess risk (non-blocking, best-effort)
+	if a.glue != nil {
+		if expl := a.glue.ExplainPermission(toolName, args); expl != nil {
+			req.Risk = expl.Risk
+			req.Explanation = expl.Explanation
+		}
+	}
+
 	a.events <- AgentEvent{Type: EventPermission, Permission: req}
 
 	// Block waiting for TUI response (or stop signal)

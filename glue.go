@@ -190,14 +190,14 @@ func (g *GlueClient) GenerateTitle(userMsg string) string {
 //  Narration (progress updates during agent work)
 // ──────────────────────────────────────────────────────────────
 
-const narratePrompt = `You are narrating an AI coding agent's progress. Given the recent tool actions, write a SHORT progress update (5-10 words). Be specific about what's happening. Use present continuous tense.
+const narratePrompt = `You are narrating an AI coding agent's progress. Given recent tool actions, write a concise progress update (8-20 words). Be specific about what's happening — name files, functions, or patterns when relevant. Use present continuous tense.
 
-Examples of good narration:
-- "Reading the authentication middleware..."
-- "Searching for database connection code..."
-- "Writing new test cases for the API..."
-- "Running the test suite..."
-- "Editing the user model to add validation..."
+Examples:
+- Reading authentication middleware and checking JWT validation logic
+- Searching for database connection patterns across the service layer
+- Writing test cases for the user API endpoints
+- Editing server.go to add the /health endpoint with uptime tracking
+- Running go test suite, fixing 2 failing assertions in auth_test.go
 
 Do NOT use quotes. Just the narration text.`
 
@@ -219,8 +219,8 @@ func (g *GlueClient) Narrate(recentActions []string) string {
 	}
 	narration := strings.TrimSpace(result)
 	narration = strings.Trim(narration, "\"'")
-	if len(narration) > 80 {
-		narration = narration[:77] + "..."
+	if len(narration) > 150 {
+		narration = narration[:147] + "..."
 	}
 	return narration
 }
@@ -299,6 +299,80 @@ func (g *GlueClient) SuggestFollowUps(taskSummary string, filesChanged int) []st
 		parsed.Suggestions = parsed.Suggestions[:3]
 	}
 	return parsed.Suggestions
+}
+
+// ──────────────────────────────────────────────────────────────
+//  Permission Explainer — glue-powered risk assessment
+// ──────────────────────────────────────────────────────────────
+
+// PermissionExplanation is a glue-generated explanation of why a
+// tool needs permission and how risky it is.
+type PermissionExplanation struct {
+	Risk        string // "LOW", "MEDIUM", "HIGH"
+	Explanation string // one-line explanation
+}
+
+const explainPermissionPrompt = `You are evaluating a tool action for safety. Respond with ONLY a JSON object.
+
+Tool: %s
+Input: %s
+
+Classify the risk:
+- LOW: Safe development action (install deps, read config, run tests, create files in project)
+- MEDIUM: Modifies files or state but is recoverable (edit code, git commit, rename)
+- HIGH: Potentially destructive or hard to reverse (delete files, force push, drop database, modify system files)
+
+Respond with ONLY this JSON (no markdown, no explanation):
+{"risk": "LOW|MEDIUM|HIGH", "explanation": "one sentence explaining what this does and why it needs approval"}`
+
+// ExplainPermission uses the fast model to explain a permission request.
+// Returns nil if glue is unavailable or the call fails (graceful degradation).
+func (g *GlueClient) ExplainPermission(toolName string, args map[string]any) *PermissionExplanation {
+	if g == nil || g.fast == nil {
+		return nil
+	}
+
+	argsJSON, _ := json.Marshal(args)
+	argsStr := string(argsJSON)
+	if len(argsStr) > 500 {
+		argsStr = argsStr[:500] + "..."
+	}
+
+	prompt := fmt.Sprintf(explainPermissionPrompt, toolName, argsStr)
+
+	response, err := nonStreamingChat(g.fast, []ChatMessage{
+		{Role: "user", Content: strPtr(prompt)},
+	})
+	if err != nil {
+		return nil
+	}
+
+	// Parse JSON response
+	var result struct {
+		Risk        string `json:"risk"`
+		Explanation string `json:"explanation"`
+	}
+	// Try to find JSON in the response (model might wrap in markdown)
+	cleaned := strings.TrimSpace(response)
+	if idx := strings.Index(cleaned, "{"); idx >= 0 {
+		if end := strings.LastIndex(cleaned, "}"); end > idx {
+			cleaned = cleaned[idx : end+1]
+		}
+	}
+	if err := json.Unmarshal([]byte(cleaned), &result); err != nil {
+		return nil
+	}
+
+	// Validate risk level
+	risk := strings.ToUpper(result.Risk)
+	if risk != "LOW" && risk != "MEDIUM" && risk != "HIGH" {
+		risk = "MEDIUM" // default to medium if unparseable
+	}
+
+	return &PermissionExplanation{
+		Risk:        risk,
+		Explanation: result.Explanation,
+	}
 }
 
 // ──────────────────────────────────────────────────────────────
