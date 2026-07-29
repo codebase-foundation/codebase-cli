@@ -4,6 +4,7 @@ import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { render } from "ink";
+import { runAcpServer } from "./acp/server.js";
 import { runAppServer } from "./app-server/server.js";
 import { runAuthSubcommand } from "./auth/cli.js";
 import { ensureFreshCredentials } from "./auth/ensure-fresh.js";
@@ -152,6 +153,13 @@ if (argv[0] === "--version" || argv[0] === "-v") {
 	// of a working server.
 	await ensureFreshCredentials();
 	runAppServer({ autoApprove: !noAutoApprove, resume }).then((code) => process.exit(code));
+} else if (argv[0] === "acp") {
+	if (argv.slice(1).some((a) => a === "--help" || a === "-h")) {
+		printAcpHelp();
+		process.exit(0);
+	}
+	await ensureFreshCredentials();
+	runAcpServer().then((code) => process.exit(code));
 } else if (argv[0] === "run") {
 	if (argv.slice(1).some((a) => a === "--help" || a === "-h")) {
 		printRunHelp();
@@ -361,6 +369,7 @@ function printHelp(): void {
 			"  codebase skills              show skill help (TUI: /skills)",
 			"  codebase tournament          show tournament help (TUI: /tournament)",
 			"  codebase director list       manage trained directors (hire, status, fire)",
+			"  codebase acp                 Agent Client Protocol server on stdio",
 			"  codebase app-server          JSON-RPC server on stdio (for IDE extensions)",
 			"  codebase --version           print version and exit",
 			"  codebase --help              show this message",
@@ -403,7 +412,7 @@ function printHelpTopics(): void {
 	process.stdout.write(
 		[
 			"Help topics:",
-			"  auth, run, auto, project, web-build, ssh, usage, doctor, mcp, receipt, bench, director, app-server",
+			"  auth, run, auto, project, web-build, ssh, usage, doctor, mcp, receipt, bench, director, acp, app-server",
 			"  memory, permissions, agents, skills, tournament, context, model, effort, rewind",
 			"",
 			"Examples:",
@@ -435,6 +444,9 @@ function printTopicHelp(rawTopic: string): boolean {
 			return true;
 		case "app-server":
 			printAppServerHelp();
+			return true;
+		case "acp":
+			printAcpHelp();
 			return true;
 		case "web-build":
 			printWebBuildHelp();
@@ -546,6 +558,24 @@ function printAppServerHelp(): void {
 			"  --resume             resume the previous session for this directory",
 			"  --no-auto-approve    emit permission_request events instead of auto-approving",
 			"  --help, -h           show this help",
+			"",
+		].join("\n"),
+	);
+}
+
+function printAcpHelp(): void {
+	process.stdout.write(
+		[
+			"usage: codebase acp",
+			"",
+			"Run Codebase as an Agent Client Protocol (ACP) agent over stdio.",
+			"",
+			"ACP clients can create isolated sessions, stream assistant and tool updates,",
+			"cancel turns, answer permission requests, and inject stdio or HTTP MCP servers.",
+			"",
+			"Buzz custom harness:",
+			"  command: codebase",
+			"  args: acp",
 			"",
 		].join("\n"),
 	);
