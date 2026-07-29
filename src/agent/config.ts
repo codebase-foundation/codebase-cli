@@ -78,7 +78,14 @@ export function resolveConfig(envOrOpts: NodeJS.ProcessEnv | ResolveConfigOption
 	//    - byok               → direct call against the provider's own API
 	const useProxy = env.CODEBASE_DISABLE_PROXY !== "1";
 	const creds = credentials.load();
-	if (creds && !credentials.isExpired(creds)) {
+	// Refreshable OAuth credentials remain sufficient to construct a proxy
+	// agent even when the current access token is wire-dead. The agent's
+	// TokenManager refreshes before the first provider request. Rejecting the
+	// credentials here creates a chicken-and-egg for long-lived ACP servers:
+	// they cannot create the next session that would perform the refresh.
+	const usableCredentials =
+		creds && (!credentials.isExpired(creds) || (creds.source === "codebase" && Boolean(creds.refreshToken)));
+	if (usableCredentials) {
 		if (creds.source === "byok" && creds.provider === "openai-compat" && creds.baseUrl) {
 			// Custom Chat Completions endpoint saved by the wizard (Ollama,
 			// LM Studio, vLLM, …). Same synthesis as the OPENAI_BASE_URL env

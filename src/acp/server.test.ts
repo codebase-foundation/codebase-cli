@@ -6,7 +6,8 @@ import { fileURLToPath } from "node:url";
 import * as acp from "@agentclientprotocol/sdk";
 import type { Model } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@earendil-works/pi-ai";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { CredentialsStore } from "../auth/credentials.js";
 import { runAcpServer } from "./server.js";
 
 const MOCK_MCP = fileURLToPath(new URL("../mcp/__test__/mock-server.mjs", import.meta.url));
@@ -131,6 +132,50 @@ describe("runAcpServer", () => {
 			.map((event) => event.update.content.text)
 			.join("");
 		expect(text).toContain("posted through Buzz");
+
+		toAgent.end();
+		await serverDone;
+	});
+
+	it("refreshes OAuth credentials before a long-lived server creates a new session", async () => {
+		const store = new CredentialsStore();
+		store.save({
+			accessToken: "access-current",
+			refreshToken: "refresh-current",
+			expiresAt: Date.now() + 4 * 60_000,
+			scopes: ["inference"],
+			source: "codebase",
+		});
+		const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+			new Response(JSON.stringify({ access_token: "access-new", expires_in: 3600 }), {
+				status: 200,
+				headers: { "Content-Type": "application/json" },
+			}),
+		);
+
+		const toAgent = new PassThrough();
+		const fromAgent = new PassThrough();
+		const serverDone = runAcpServer({
+			stdin: toAgent,
+			stdout: fromAgent,
+			configOverride: { model, apiKey: "faux-key", source: "byok" },
+		});
+		const stream = acp.ndJsonStream(Writable.toWeb(toAgent), Readable.toWeb(fromAgent) as ReadableStream<Uint8Array>);
+
+		await acp.client({ name: "buzz-refresh-test" }).connectWith(stream, async (client) => {
+			await client.request(acp.methods.agent.initialize, {
+				protocolVersion: acp.PROTOCOL_VERSION,
+				clientInfo: { name: "buzz-acp", version: "test" },
+			});
+			await client.request(acp.methods.agent.session.new, {
+				cwd,
+				mcpServers: [],
+			});
+		});
+
+		const refreshCalls = fetchSpy.mock.calls.filter(([input]) => String(input).endsWith("/api/oauth/token"));
+		expect(refreshCalls).toHaveLength(1);
+		expect(store.load()?.accessToken).toBe("access-new");
 
 		toAgent.end();
 		await serverDone;
