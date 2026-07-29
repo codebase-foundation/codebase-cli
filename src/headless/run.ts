@@ -3,7 +3,7 @@ import type { Usage } from "@earendil-works/pi-ai";
 import { type AgentBundle, type CreateAgentOptions, createAgent } from "../agent/agent.js";
 import { ConfigError } from "../agent/config.js";
 import { visibleMessages } from "../agent/visible-messages.js";
-import { userFacingErrorMessage } from "../errors/user-facing.js";
+import { latestAssistantError, userFacingErrorMessage } from "../errors/user-facing.js";
 import { ReceiptStore } from "./receipt-store.js";
 import {
 	formatReliabilityFailure,
@@ -533,15 +533,6 @@ function extractText(message: { content?: unknown }): string {
 		if (block.type === "text" && typeof block.text === "string") parts.push(block.text);
 	}
 	return parts.join("");
-}
-
-function latestAssistantError(messages: AgentMessage[]): string | undefined {
-	const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant");
-	if (!lastAssistant) return undefined;
-	const candidate = lastAssistant as { stopReason?: unknown; errorMessage?: unknown };
-	if (typeof candidate.errorMessage === "string" && candidate.errorMessage.trim()) return candidate.errorMessage;
-	if (candidate.stopReason === "error") return "Agent turn ended with an error.";
-	return undefined;
 }
 
 function latestAssistantText(messages: AgentMessage[]): string {

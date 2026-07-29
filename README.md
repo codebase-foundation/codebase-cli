@@ -94,15 +94,41 @@ Codebase speaks the [Agent Client Protocol](https://agentclientprotocol.com/) ov
 codebase acp
 ```
 
-For a Buzz custom harness, use:
+### Buzz
+
+Buzz accepts Codebase as a custom ACP harness. Current Buzz builds only attach
+their channel-publishing MCP to recognized runtime names, so use this small
+compatibility launcher until Buzz supports MCP injection for every custom
+harness:
+
+```sh
+mkdir -p ~/.local/share/codebase-buzz
+cat > ~/.local/share/codebase-buzz/codex-acp <<'SH'
+#!/bin/sh
+if [ "$#" -eq 1 ] && [ "$1" = "--version" ]; then
+  echo "codebase-acp 1.1.7"
+  exit 0
+fi
+[ "$#" -gt 0 ] || set -- acp
+exec codebase "$@"
+SH
+chmod +x ~/.local/share/codebase-buzz/codex-acp
+```
+
+Then add the Buzz custom harness:
 
 ```text
 Name: Codebase
-Command: codebase
-Arguments: acp
+Command: /Users/YOU/.local/share/codebase-buzz/codex-acp
+Arguments: (leave empty)
 ```
 
-Buzz can then discover the models available to your Codebase account. Each ACP
+The launcher still runs Codebase; the `codex-acp` filename lets current Buzz
+versions supply the MCP tools an agent needs to publish its answer into the
+channel. Without that bridge, Buzz may show Codebase's generated text in agent
+activity but never post it as a message.
+
+Buzz can discover the models available to your Codebase account. Each ACP
 session gets its own working directory and conversation, accepts client-supplied
 MCP servers, streams assistant and tool progress, supports cancellation, and
 routes write/shell approvals through the client's permission UI.

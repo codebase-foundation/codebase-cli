@@ -7,6 +7,7 @@ import type { AgentEvent } from "@earendil-works/pi-agent-core";
 import type { ImageContent } from "@earendil-works/pi-ai";
 import { type AgentBundle, type CreateAgentOptions, createAgent } from "../agent/agent.js";
 import type { ModelOption } from "../agent/model-list.js";
+import { latestAssistantError, userFacingErrorMessage } from "../errors/user-facing.js";
 import type { NamedServer } from "../mcp/config.js";
 import type { PermissionRequest, ResponseChoice } from "../permissions/store.js";
 import { VERSION } from "../version.js";
@@ -165,7 +166,14 @@ export async function runAcpServer(options: AcpServerOptions = {}): Promise<numb
 				await session.notificationQueue;
 				return { stopReason: "refusal" };
 			}
-			if (result.error) throw new Error(result.error);
+			const turnError = result.error ?? latestAssistantError(session.bundle.agent.state.messages);
+			if (turnError) {
+				const prefix = session.assistantText
+					? "\n\nCodebase couldn't complete this turn: "
+					: "Codebase couldn't complete this turn: ";
+				await notifyText(session, client, `${prefix}${userFacingErrorMessage(turnError)}`);
+				await session.notificationQueue;
+			}
 			return { stopReason: "end_turn" };
 		} finally {
 			unsubscribeEvents();
