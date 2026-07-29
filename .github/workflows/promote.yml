@@ -14,7 +14,7 @@ on:
       - "promote-latest-v*"
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   promote:
@@ -37,3 +37,10 @@ jobs:
           npm dist-tag add "codebase-cli@$VERSION" latest
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Mark the matching GitHub release as latest
+        run: |
+          VERSION="${GITHUB_REF_NAME#promote-latest-v}"
+          gh release edit "v$VERSION" --prerelease=false --latest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
