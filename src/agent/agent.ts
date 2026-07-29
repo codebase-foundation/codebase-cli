@@ -32,6 +32,7 @@ import type { ToolContext } from "../tools/types.js";
 import { UserQueryStore } from "../user-queries/store.js";
 import { type ResolvedConfig, resolveConfig } from "./config.js";
 import { type Effort, resolveEffort } from "./effort.js";
+import { fetchAvailableModels, type ModelOption } from "./model-list.js";
 import { buildProjectFilesAddendum } from "./project-files.js";
 import { streamProxySafely } from "./safe-stream.js";
 import { buildSystemPrompt } from "./system-prompt.js";
@@ -168,6 +169,8 @@ export interface AgentBundle {
 	 * mcp.json exists.
 	 */
 	connectMcp: () => Promise<readonly McpServerStatus[]>;
+	/** Discover models available through the resolved provider or Codebase proxy. */
+	availableModels: (signal?: AbortSignal) => Promise<ModelOption[]>;
 }
 
 export function createAgent(opts: CreateAgentOptions = {}): AgentBundle {
@@ -597,6 +600,8 @@ export function createAgent(opts: CreateAgentOptions = {}): AgentBundle {
 		}
 		return mcp.status();
 	};
+	const availableModels = async (signal?: AbortSignal): Promise<ModelOption[]> =>
+		fetchAvailableModels(model, await getApiKey(), signal);
 
 	void agentRef;
 	return {
@@ -625,6 +630,7 @@ export function createAgent(opts: CreateAgentOptions = {}): AgentBundle {
 		checkpoints,
 		mcp,
 		connectMcp,
+		availableModels,
 	};
 }
 

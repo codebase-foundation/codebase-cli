@@ -86,6 +86,27 @@ codebase project build --wait "build a launch waitlist page"
 
 OAuth uses Codebase Auto by default (`codebase/d4f`, in-house DeepSeek V4 Flash). Swap models live with `/model`. Set reasoning depth with `/effort`. `project build` hands a prompt to the web builder and prints the session, status, event stream, and preview URL when you pass `--wait`.
 
+## Use Codebase from an ACP client
+
+Codebase speaks the [Agent Client Protocol](https://agentclientprotocol.com/) over stdio:
+
+```sh
+codebase acp
+```
+
+For a Buzz custom harness, use:
+
+```text
+Name: Codebase
+Command: codebase
+Arguments: acp
+```
+
+Buzz can then discover the models available to your Codebase account. Each ACP
+session gets its own working directory and conversation, accepts client-supplied
+MCP servers, streams assistant and tool progress, supports cancellation, and
+routes write/shell approvals through the client's permission UI.
+
 ## What makes it good
 
 - **🏁 Tournaments.** `/tournament <task>` races several agents on the same change in isolated worktrees, a judge ranks them, you merge the winner. `--models opus,sonnet,haiku` pits models head-to-head on *your* code.
@@ -93,6 +114,7 @@ OAuth uses Codebase Auto by default (`codebase/d4f`, in-house DeepSeek V4 Flash)
 - **↺ Rewind anything.** `/rewind` rolls the conversation *and* the files back to before any earlier prompt — a bad turn fully un-happens. Every edit is checkpointed.
 - **🧠 Remembers across sessions.** Pulls durable facts (your prefs, project decisions, the rules you set) out of a session, then recalls matching notes with file/source/session/last-used/staleness labels. `#note` to add one by hand; `/memory list|show|forget` to inspect or clean them up.
 - **🔌 MCP.** Connect external tool servers (filesystem, Postgres, git, fetch, …) over stdio or remote HTTP, OAuth and all. Their tools splice straight into the agent.
+- **ACP.** Run `codebase acp` to use Codebase from Buzz and other ACP clients, with model discovery, streamed tool activity, cancellation, permissions, and client-supplied MCP servers.
 - **🤖 Subagents.** Fan out read-only researchers or write-capable workers that keep their tool-noise out of your main context — each can run in its own git worktree, on its own model and reasoning level.
 - **🪝 Hooks.** Shell commands on lifecycle events (pre/post tool, edit, prompt, session start/end) — run a formatter on save, block secrets, commit on exit.
 - **🌐 SSH.** Run commands on enrolled remote hosts by name, behind the same safety validator as the local shell.

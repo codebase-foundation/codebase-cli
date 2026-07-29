@@ -72,9 +72,19 @@ export class McpManager {
 	 */
 	async connectAll(options: LoadMcpConfigOptions = {}): Promise<void> {
 		const servers = loadMcpServers(options);
+		await this.connectServers(servers);
+	}
+
+	/**
+	 * Connect an explicit server list supplied by an embedding protocol such
+	 * as ACP. Existing configured servers and supplied servers share the same
+	 * lifecycle and tool bridge.
+	 */
+	async connectServers(servers: readonly NamedServer[]): Promise<void> {
 		await Promise.all(
 			servers.map(async (server) => {
 				const { name } = server;
+				if (this.clientsByName.has(name)) return;
 				const client = this.makeClient(server);
 				try {
 					await client.connect();
