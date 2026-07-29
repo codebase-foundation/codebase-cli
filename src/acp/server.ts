@@ -7,6 +7,7 @@ import type { AgentEvent } from "@earendil-works/pi-agent-core";
 import type { ImageContent } from "@earendil-works/pi-ai";
 import { type AgentBundle, type CreateAgentOptions, createAgent } from "../agent/agent.js";
 import type { ModelOption } from "../agent/model-list.js";
+import { ensureFreshCredentials } from "../auth/ensure-fresh.js";
 import { latestAssistantError, userFacingErrorMessage } from "../errors/user-facing.js";
 import type { NamedServer } from "../mcp/config.js";
 import type { PermissionRequest, ResponseChoice } from "../permissions/store.js";
@@ -72,6 +73,7 @@ export async function runAcpServer(options: AcpServerOptions = {}): Promise<numb
 	async function newSession(params: acp.NewSessionRequest): Promise<acp.NewSessionResponse> {
 		if (!isAbsolute(params.cwd)) throw new Error("ACP session cwd must be an absolute path");
 
+		await ensureFreshCredentials();
 		const bundle = createAgent({
 			cwd: params.cwd,
 			autoApprove: false,
@@ -115,6 +117,7 @@ export async function runAcpServer(options: AcpServerOptions = {}): Promise<numb
 		if (!selected) throw new Error(`unknown model: ${params.value}`);
 		if (session.bundle.model.id === selected.id) return { configOptions: [modelConfig(session)] };
 
+		await ensureFreshCredentials();
 		const previous = session.bundle;
 		const next = createAgent({
 			cwd: session.cwd,

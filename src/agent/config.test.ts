@@ -73,6 +73,33 @@ describe("resolveConfig", () => {
 		expect(config.model.contextWindow).toBe(131_072);
 	});
 
+	it("constructs a proxy agent from expired OAuth credentials that can refresh", () => {
+		credentials.save({
+			accessToken: "expired-oauth-token",
+			refreshToken: "refresh-token",
+			expiresAt: Date.now() - 60_000,
+			scopes: ["inference"],
+			source: "codebase",
+		});
+
+		const config = resolveConfig({ env: {}, credentials });
+
+		expect(config.source).toBe("proxy");
+		expect(config.apiKey).toBe("expired-oauth-token");
+		expect(config.model.provider).toBe("codebase");
+	});
+
+	it("does not use an expired manual token that cannot refresh", () => {
+		credentials.save({
+			accessToken: "expired-manual-token",
+			expiresAt: Date.now() - 60_000,
+			scopes: ["inference"],
+			source: "manual",
+		});
+
+		expect(() => resolveConfig({ env: {}, credentials })).toThrow();
+	});
+
 	it("treats provider=codebase model overrides as proxy-routed model ids", () => {
 		credentials.save({
 			accessToken: "oauth-token",

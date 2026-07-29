@@ -14,15 +14,15 @@ import { TokenManager } from "./token-manager.js";
  * succeeds. That's a chicken/egg the previous code didn't notice
  * because a fresh login + fresh process never tripped it.
  *
- * Safe to call on every launch. No-ops when:
+ * Safe to call before every launch or long-lived server session. No-ops when:
  *   - no credentials exist (wizard handles it)
  *   - source isn't "codebase" (BYOK / env-key sessions don't refresh)
- *   - access token is still good (TokenManager's preemptive window)
+ *   - access token is outside TokenManager's preemptive refresh window
  *
- * Errors are NOT thrown: a network blip during cold start should fall
- * through to `resolveConfig`, which will produce the existing
- * "please run `codebase auth login`" path. The user sees one error,
- * not two layered ones.
+ * Errors are NOT thrown: a network blip during preflight should not prevent
+ * a refreshable proxy session from being created. The agent's TokenManager
+ * retries at the provider-call boundary, where callers can render the
+ * canonical sign-in or network error instead of an opaque startup failure.
  */
 export async function ensureFreshCredentials(): Promise<void> {
 	const store = new CredentialsStore();
@@ -30,7 +30,6 @@ export async function ensureFreshCredentials(): Promise<void> {
 	if (!creds) return;
 	if (creds.source !== "codebase") return;
 	if (!creds.refreshToken) return;
-	if (!store.isExpired(creds)) return;
 
 	const manager = new TokenManager({ store, oauthConfig: defaultOAuthConfig() });
 	try {
