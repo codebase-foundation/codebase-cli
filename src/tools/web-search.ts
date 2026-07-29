@@ -69,7 +69,7 @@ export interface ProviderEnv {
 
 export interface HostedSearchConfig {
 	baseUrl: string;
-	getAccessToken: () => Promise<string>;
+	getAuthHeaders: () => Promise<Record<string, string>>;
 }
 
 export function createWebSearch(ctx: ToolContext): AgentTool<typeof Params, WebSearchDetails> {
@@ -138,11 +138,11 @@ function codebaseProvider(config: HostedSearchConfig): ProviderConfig {
 	return {
 		name: "codebase",
 		search: async (query, max, signal) => {
-			const token = await config.getAccessToken();
+			const authHeaders = await config.getAuthHeaders();
 			const res = await fetch(url, {
 				method: "POST",
 				headers: {
-					Authorization: `Bearer ${token}`,
+					...authHeaders,
 					"Content-Type": "application/json",
 					Accept: "application/json",
 				},

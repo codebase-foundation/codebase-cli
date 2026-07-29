@@ -89,6 +89,20 @@ describe("resolveConfig", () => {
 		expect(config.model.provider).toBe("codebase");
 	});
 
+	it("uses X-API-Key transport for a manually entered Codebase API key", () => {
+		credentials.save({
+			accessToken: "cb_test_manual",
+			scopes: ["inference"],
+			source: "manual",
+		});
+
+		const config = resolveConfig({ env: {}, credentials });
+
+		expect(config.source).toBe("proxy");
+		expect(config.proxyAuth).toBe("api-key");
+		expect(config.model.headers).toMatchObject({ "X-API-Key": "cb_test_manual" });
+	});
+
 	it("does not use an expired manual token that cannot refresh", () => {
 		credentials.save({
 			accessToken: "expired-manual-token",

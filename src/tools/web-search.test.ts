@@ -62,7 +62,10 @@ describe("web_search provider selection", () => {
 	});
 
 	it("uses Codebase hosted search only when no local provider is configured", () => {
-		const hosted = { baseUrl: "https://codebase.design", getAccessToken: async () => "token" };
+		const hosted = {
+			baseUrl: "https://codebase.design",
+			getAuthHeaders: async () => ({ Authorization: "Bearer token" }),
+		};
 		expect(pickProvider({}, hosted).name).toBe("codebase");
 		expect(pickProvider({ BRAVE_API_KEY: "x" }, hosted).name).toBe("brave");
 	});
@@ -182,7 +185,7 @@ describe("web_search end-to-end via mock servers", () => {
 				...makeCtx(),
 				platform: {
 					baseUrl,
-					getAccessToken: async () => "oauth-token",
+					getAuthHeaders: async () => ({ Authorization: "Bearer oauth-token" }),
 				},
 			}).execute("call", { query: "AIPG", max_results: 4 });
 
@@ -191,6 +194,31 @@ describe("web_search end-to-end via mock servers", () => {
 				title: "AI Power Grid",
 				url: "https://example.com/aipg",
 			});
+		} finally {
+			Object.assign(process.env, original);
+		}
+	});
+
+	it("uses X-API-Key for hosted search with a manually entered Codebase key", async () => {
+		routes["/api/v1/search"] = (req, res) => {
+			expect(req.headers["x-api-key"]).toBe("cb_test_manual");
+			expect(req.headers.authorization).toBeUndefined();
+			res.setHeader("Content-Type", "application/json");
+			res.end(JSON.stringify({ results: [] }));
+		};
+
+		const original = { ...process.env };
+		for (const key of ["TAVILY_API_KEY", "BRAVE_API_KEY", "SEARXNG_URL"]) delete process.env[key];
+		try {
+			const result = await createWebSearch({
+				...makeCtx(),
+				platform: {
+					baseUrl,
+					getAuthHeaders: async () => ({ "X-API-Key": "cb_test_manual" }),
+				},
+			}).execute("call", { query: "manual auth" });
+
+			expect(result.details.provider).toBe("codebase");
 		} finally {
 			Object.assign(process.env, original);
 		}

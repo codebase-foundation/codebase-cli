@@ -24,7 +24,7 @@ export async function fetchAvailableModels(
 	if (provider === "google") return fetchGoogle(apiKey, signal);
 	const baseUrl = (model.baseUrl ?? "").replace(/\/+$/, "");
 	if (!baseUrl) return [];
-	return fetchOpenAiCompat(baseUrl, apiKey, provider, signal);
+	return fetchOpenAiCompat(baseUrl, apiKey, provider, model.headers, signal);
 }
 
 /** OpenAI-compatible `GET {baseUrl}/models`. Also parses our proxy's `{models:[…]}` shape. */
@@ -32,12 +32,15 @@ async function fetchOpenAiCompat(
 	baseUrl: string,
 	apiKey: string | undefined,
 	provider: string,
+	modelHeaders: Record<string, string> | undefined,
 	signal?: AbortSignal,
 ): Promise<ModelOption[]> {
-	const headers: Record<string, string> = { Accept: "application/json" };
+	const headers: Record<string, string> = { ...modelHeaders, Accept: "application/json" };
 	// Local servers (Ollama/LM Studio) usually need no auth; only send a key
-	// when we have a real one.
-	if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+	// when we have a real one. A model-level X-API-Key means this is a
+	// manually entered Codebase key, so do not duplicate it as Bearer.
+	const hasApiKeyHeader = Object.keys(headers).some((name) => name.toLowerCase() === "x-api-key");
+	if (apiKey && !hasApiKeyHeader) headers.Authorization = `Bearer ${apiKey}`;
 	const res = await fetch(`${baseUrl}/models`, { headers, signal });
 	if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
 	const json = (await res.json()) as { data?: unknown; models?: unknown };

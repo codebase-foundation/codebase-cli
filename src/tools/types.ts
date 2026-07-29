@@ -24,7 +24,7 @@ export interface ToolContext {
 	 */
 	platform?: {
 		baseUrl: string;
-		getAccessToken: () => Promise<string>;
+		getAuthHeaders: () => Promise<Record<string, string>>;
 	};
 	fileStateCache: FileStateCache;
 	tasks: TaskStore;

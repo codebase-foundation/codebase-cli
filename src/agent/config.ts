@@ -51,6 +51,8 @@ export interface ResolvedConfig {
 	model: Model<string>;
 	apiKey: string;
 	source: "explicit" | "auto" | "proxy" | "byok";
+	/** Header contract for Codebase proxy credentials. OAuth uses Bearer; issued keys use X-API-Key. */
+	proxyAuth?: "bearer" | "api-key";
 }
 
 export class ConfigError extends Error {}
@@ -102,7 +104,12 @@ export function resolveConfig(envOrOpts: NodeJS.ProcessEnv | ResolveConfigOption
 			const byok = buildByokConfig(creds.provider as KnownProvider, creds.accessToken, override);
 			if (byok) return byok;
 		} else if (useProxy) {
-			const proxied = buildProxiedConfig(env, creds.accessToken, override);
+			const proxied = buildProxiedConfig(
+				env,
+				creds.accessToken,
+				creds.source === "manual" ? "api-key" : "bearer",
+				override,
+			);
 			if (proxied) return proxied;
 		}
 	}
@@ -202,6 +209,7 @@ export function resolveConfig(envOrOpts: NodeJS.ProcessEnv | ResolveConfigOption
 function buildProxiedConfig(
 	env: NodeJS.ProcessEnv,
 	accessToken: string,
+	authMode: "bearer" | "api-key",
 	override?: { provider?: string; modelId: string },
 ): ResolvedConfig | null {
 	// Runtime override (set via /model) wins over env vars wins over the default.
@@ -220,35 +228,39 @@ function buildProxiedConfig(
 		const template = getModel("groq", "llama-3.3-70b-versatile") as Model<string> | undefined;
 		if (!template) return null;
 		const isDefault = !explicitModel;
-		const model: Model<string> = {
-			...template,
-			// "Codebase Auto" — backend renamed this slot from MiniMax-M2.7
-			// to d4f (DeepSeek V4 Flash) when the underlying SGLang server
-			// was repointed. Keep this in sync with web/backend/providers/
-			// registry.js DEFAULT_MODEL.
-			id: explicitModel ?? "d4f",
-			name: isDefault ? "Codebase Auto" : (explicitModel ?? "Codebase Auto"),
-			baseUrl: proxyBase,
-			// Override provider so the status bar and /model don't lie about
-			// where this is served from. pi-ai uses `provider` mainly for
-			// display + a few baseUrl heuristics; the request body sends
-			// `model.id` only, so this cast is safe.
-			provider: "codebase" as Model<string>["provider"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			// Keep this in sync with web/backend/providers/registry.js. The
-			// Groq llama template's context window is only a synthesis
-			// scaffold; compaction must budget against the actual d4f backend.
-			contextWindow: 131_072,
-		};
-		return { model, apiKey: accessToken, source: "proxy" };
+		const model = withProxyAuthHeaders(
+			{
+				...template,
+				// "Codebase Auto" — backend renamed this slot from MiniMax-M2.7
+				// to d4f (DeepSeek V4 Flash) when the underlying SGLang server
+				// was repointed. Keep this in sync with web/backend/providers/
+				// registry.js DEFAULT_MODEL.
+				id: explicitModel ?? "d4f",
+				name: isDefault ? "Codebase Auto" : (explicitModel ?? "Codebase Auto"),
+				baseUrl: proxyBase,
+				// Override provider so the status bar and /model don't lie about
+				// where this is served from. pi-ai uses `provider` mainly for
+				// display + a few baseUrl heuristics; the request body sends
+				// `model.id` only, so this cast is safe.
+				provider: "codebase" as Model<string>["provider"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				// Keep this in sync with web/backend/providers/registry.js. The
+				// Groq llama template's context window is only a synthesis
+				// scaffold; compaction must budget against the actual d4f backend.
+				contextWindow: 131_072,
+			},
+			accessToken,
+			authMode,
+		);
+		return { model, apiKey: accessToken, source: "proxy", proxyAuth: authMode };
 	}
 
 	const modelId = explicitModel ?? DEFAULT_MODELS[explicitProvider];
 	if (!modelId) return null;
 	const baseModel = getModel(explicitProvider, modelId as never) as Model<string> | undefined;
 	if (baseModel) {
-		const proxiedModel: Model<string> = { ...baseModel, baseUrl: proxyBase };
-		return { model: proxiedModel, apiKey: accessToken, source: "proxy" };
+		const proxiedModel = withProxyAuthHeaders({ ...baseModel, baseUrl: proxyBase }, accessToken, authMode);
+		return { model: proxiedModel, apiKey: accessToken, source: "proxy", proxyAuth: authMode };
 	}
 	// pi-ai's registry doesn't know this provider+modelId combo (common for
 	// backend-only models the proxy exposes, e.g. "codebase:MiniMax-M2.7"
@@ -260,20 +272,39 @@ function buildProxiedConfig(
 	// didn't have native cost / context-window data for.
 	const template = getModel("groq", "llama-3.3-70b-versatile") as Model<string> | undefined;
 	if (!template) return null;
-	const synthesized: Model<string> = {
-		...template,
-		id: modelId,
-		name: modelId,
-		baseUrl: proxyBase,
-		provider: explicitProvider as Model<string>["provider"],
-		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-		// Same reasoning as Codebase Auto: synthesized proxy models point
-		// at large-context backends. Without overriding contextWindow the
-		// Groq llama template's 128k leaks through and the compaction
-		// engine triggers ~30% earlier than it should.
-		contextWindow: guessContextWindow(modelId, 200_000),
+	const synthesized = withProxyAuthHeaders(
+		{
+			...template,
+			id: modelId,
+			name: modelId,
+			baseUrl: proxyBase,
+			provider: explicitProvider as Model<string>["provider"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			// Same reasoning as Codebase Auto: synthesized proxy models point
+			// at large-context backends. Without overriding contextWindow the
+			// Groq llama template's 128k leaks through and the compaction
+			// engine triggers ~30% earlier than it should.
+			contextWindow: guessContextWindow(modelId, 200_000),
+		},
+		accessToken,
+		authMode,
+	);
+	return { model: synthesized, apiKey: accessToken, source: "proxy", proxyAuth: authMode };
+}
+
+function withProxyAuthHeaders(
+	model: Model<string>,
+	accessToken: string,
+	authMode: "bearer" | "api-key",
+): Model<string> {
+	if (authMode === "bearer") return model;
+	return {
+		...model,
+		headers: {
+			...model.headers,
+			"X-API-Key": accessToken,
+		},
 	};
-	return { model: synthesized, apiKey: accessToken, source: "proxy" };
 }
 
 /**
