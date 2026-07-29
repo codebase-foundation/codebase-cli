@@ -41,6 +41,9 @@ jobs:
       - name: Mark the matching GitHub release as latest
         run: |
           VERSION="${GITHUB_REF_NAME#promote-latest-v}"
-          gh release edit "v$VERSION" --prerelease=false --latest
+          gh release edit "v$VERSION" \
+            --repo "$GITHUB_REPOSITORY" \
+            --prerelease=false \
+            --latest
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
