@@ -29,7 +29,7 @@ and project memory all keep working.
 | `~/.codebase/config.json` | User config (theme, MCP servers, hooks) | Compatible. New fields are added; existing ones are read as before. |
 | `CLAUDE.md`, `AGENTS.md`, `CODEX.md`, `.cursorrules` | Project instructions | Identical pickup logic. |
 | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_MODEL` | Provider env vars | Identical. |
-| `GLUE_*`, `TAVILY_API_KEY`, `BRAVE_API_KEY`, `SEARXNG_URL` | Sidecar + search keys | Identical. |
+| `GLUE_*`, `TAVILY_API_KEY`, `BRAVE_API_KEY`, `SEARXNG_URL` | Sidecar + search keys | Still supported. Signed-in Codebase sessions can use hosted search without a separate search key. |
 | `CODEBASE_NOBOOT`, `CODEBASE_NOSOUND` | Behavior toggles | Identical. |
 
 If you sign in via codebase.foundation in v1, you stay signed in

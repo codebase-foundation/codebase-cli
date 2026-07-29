@@ -52,7 +52,7 @@ describe("buildDoctorReport", () => {
 		const out = buildDoctorReport({
 			cwd,
 			dataRoot,
-			env: { TAVILY_API_KEY: "configured" } as NodeJS.ProcessEnv,
+			env: {},
 			model: { provider: "codebase", id: "d4f", name: "Codebase Auto" },
 			source: "proxy",
 			mcpStatuses: [{ name: "db", connected: false, toolCount: 0, error: "spawn failed" }],
@@ -66,7 +66,7 @@ describe("buildDoctorReport", () => {
 		expect(out).toContain("config ");
 		expect(out).toContain("is not valid JSON");
 		expect(out).toContain("mcp db: spawn failed");
-		expect(out).toContain("✓ web_search configured");
+		expect(out).toContain("✓ web_search configured (Codebase hosted)");
 		expect(out).toContain("sessions for this directory: 3");
 		expect(out).toContain("subagent types: general");
 	});

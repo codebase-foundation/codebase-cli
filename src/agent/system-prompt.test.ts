@@ -28,6 +28,12 @@ describe("buildSystemPrompt", () => {
 		expect(out).toMatch(/Issue independent tool calls together/);
 	});
 
+	it("forbids presenting invented results after a failed web search", () => {
+		const out = buildSystemPrompt();
+		expect(out).toMatch(/When web_search fails, no search occurred/);
+		expect(out).toMatch(/never invent.*links as search results/i);
+	});
+
 	it("teaches subagent dispatch for fan-out work", () => {
 		const out = buildSystemPrompt();
 		expect(out).toMatch(/dispatch_agent/);

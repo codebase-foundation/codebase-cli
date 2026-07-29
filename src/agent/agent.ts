@@ -324,6 +324,12 @@ export function createAgent(opts: CreateAgentOptions = {}): AgentBundle {
 
 	const toolContext: ToolContext = {
 		cwd,
+		...(tokenManager && {
+			platform: {
+				baseUrl: (process.env.CODEBASE_AUTH_BASE_URL ?? "https://codebase.design").replace(/\/+$/, ""),
+				getAccessToken: () => tokenManager.getAccessToken(),
+			},
+		}),
 		fileStateCache: new FileStateCache(),
 		tasks: new TaskStore({ cwd, taskListId: opts.taskListId ?? sessions.id }),
 		userQueries,

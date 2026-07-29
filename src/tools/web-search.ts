@@ -48,10 +48,11 @@ Provider auto-detected from env (highest-priority match wins):
 - TAVILY_API_KEY  → Tavily (recommended; free tier available)
 - BRAVE_API_KEY   → Brave Search
 - SEARXNG_URL     → self-hosted SearXNG instance
+- Codebase OAuth  → hosted search (when signed in)
 
-If none are set, this tool errors with onboarding instructions instead of attempting an unauthenticated fallback. Default 5 results, max 20.`;
+Local providers take priority over hosted search. If none are available, this tool errors with onboarding instructions instead of attempting an unauthenticated fallback. Default 5 results, max 20.`;
 
-export type ProviderName = "tavily" | "brave" | "searxng";
+export type ProviderName = "tavily" | "brave" | "searxng" | "codebase";
 
 interface ProviderConfig {
 	name: ProviderName;
@@ -66,7 +67,12 @@ export interface ProviderEnv {
 	SEARXNG_URL?: string;
 }
 
-export function createWebSearch(_ctx: ToolContext): AgentTool<typeof Params, WebSearchDetails> {
+export interface HostedSearchConfig {
+	baseUrl: string;
+	getAccessToken: () => Promise<string>;
+}
+
+export function createWebSearch(ctx: ToolContext): AgentTool<typeof Params, WebSearchDetails> {
 	return {
 		name: "web_search",
 		label: "Search",
@@ -74,7 +80,7 @@ export function createWebSearch(_ctx: ToolContext): AgentTool<typeof Params, Web
 		parameters: Params,
 		executionMode: "parallel",
 		execute: async (_id, params, signal) => {
-			const provider = pickProvider(process.env);
+			const provider = pickProvider(process.env, ctx.platform);
 			const max = params.max_results ?? DEFAULT_RESULTS;
 			const timeout = params.timeout_ms ?? DEFAULT_TIMEOUT_MS;
 
@@ -107,7 +113,7 @@ export function createWebSearch(_ctx: ToolContext): AgentTool<typeof Params, Web
 	};
 }
 
-export function pickProvider(env: ProviderEnv): ProviderConfig {
+export function pickProvider(env: ProviderEnv, hosted?: HostedSearchConfig): ProviderConfig {
 	if (env.TAVILY_API_KEY) {
 		return tavilyProvider(env.TAVILY_API_KEY, env.TAVILY_BASE_URL);
 	}
@@ -117,10 +123,51 @@ export function pickProvider(env: ProviderEnv): ProviderConfig {
 	if (env.SEARXNG_URL) {
 		return searxngProvider(env.SEARXNG_URL);
 	}
+	if (hosted) {
+		return codebaseProvider(hosted);
+	}
 	throw new Error(
-		"web_search has no provider configured. Set one of TAVILY_API_KEY (recommended), BRAVE_API_KEY, " +
-			"or SEARXNG_URL. Tavily offers a free tier at https://tavily.com.",
+		"SEARCH_FAILED_NO_RESULTS: web_search has no provider configured. Sign in with `codebase auth login`, " +
+			"or set TAVILY_API_KEY, BRAVE_API_KEY, or SEARXNG_URL. No web results were obtained; do not invent " +
+			"or present search results.",
 	);
+}
+
+function codebaseProvider(config: HostedSearchConfig): ProviderConfig {
+	const url = `${config.baseUrl.replace(/\/+$/, "")}/api/v1/search`;
+	return {
+		name: "codebase",
+		search: async (query, max, signal) => {
+			const token = await config.getAccessToken();
+			const res = await fetch(url, {
+				method: "POST",
+				headers: {
+					Authorization: `Bearer ${token}`,
+					"Content-Type": "application/json",
+					Accept: "application/json",
+				},
+				body: JSON.stringify({ query, max_results: max }),
+				signal,
+			});
+			const json = (await res.json().catch(() => ({}))) as {
+				error?: string;
+				error_description?: string;
+				results?: SearchResult[];
+			};
+			if (!res.ok) {
+				const reason = json.error_description ?? json.error ?? res.statusText;
+				throw new Error(`codebase ${res.status} ${reason}`);
+			}
+			return Array.isArray(json.results)
+				? json.results.filter(
+						(result) =>
+							typeof result?.title === "string" &&
+							typeof result?.url === "string" &&
+							typeof result?.snippet === "string",
+					)
+				: [];
+		},
+	};
 }
 
 function tavilyProvider(apiKey: string, baseUrl?: string): ProviderConfig {
