@@ -135,4 +135,60 @@ describe("runAcpServer", () => {
 		toAgent.end();
 		await serverDone;
 	});
+
+	it("streams provider failures as visible ACP messages", async () => {
+		faux.setResponses([
+			fauxAssistantMessage([], {
+				stopReason: "error",
+				errorMessage: '402 "insufficient_credits"',
+			}),
+		]);
+
+		const toAgent = new PassThrough();
+		const fromAgent = new PassThrough();
+		const serverDone = runAcpServer({
+			stdin: toAgent,
+			stdout: fromAgent,
+			configOverride: { model, apiKey: "faux-key", source: "byok" },
+		});
+		const updates: acp.SessionNotification[] = [];
+		const stream = acp.ndJsonStream(Writable.toWeb(toAgent), Readable.toWeb(fromAgent) as ReadableStream<Uint8Array>);
+
+		const result = await acp
+			.client({ name: "buzz-error-test" })
+			.onNotification(acp.methods.client.session.update, (ctx) => {
+				updates.push(ctx.params);
+			})
+			.connectWith(stream, async (client) => {
+				await client.request(acp.methods.agent.initialize, {
+					protocolVersion: acp.PROTOCOL_VERSION,
+					clientInfo: { name: "buzz-acp", version: "test" },
+				});
+				const session = await client.request(acp.methods.agent.session.new, {
+					cwd,
+					mcpServers: [],
+				});
+				return client.request(acp.methods.agent.session.prompt, {
+					sessionId: session.sessionId,
+					prompt: [{ type: "text", text: "Reply even if the provider fails." }],
+				});
+			});
+
+		expect(result.stopReason).toBe("end_turn");
+		const text = updates
+			.filter(
+				(
+					event,
+				): event is acp.SessionNotification & {
+					update: { sessionUpdate: "agent_message_chunk"; content: { type: "text"; text: string } };
+				} => event.update.sessionUpdate === "agent_message_chunk" && event.update.content.type === "text",
+			)
+			.map((event) => event.update.content.text)
+			.join("");
+		expect(text).toContain("Codebase couldn't complete this turn");
+		expect(text).toContain("Codebase credits are exhausted");
+
+		toAgent.end();
+		await serverDone;
+	});
 });
