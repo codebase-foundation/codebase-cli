@@ -71,7 +71,11 @@ jobs:
           EOF
 
       - name: Compile ${{ matrix.target }}
-        run: bun build --compile --target=${{ matrix.target }} src/cli.tsx --outfile=${{ matrix.asset }}
+        run: |
+          VERSION_JSON="$(node -p "JSON.stringify(require('./package.json').version)")"
+          bun build --compile --target=${{ matrix.target }} \
+            --define "CODEBASE_BUILD_VERSION=${VERSION_JSON}" \
+            src/cli.tsx --outfile=${{ matrix.asset }}
 
       - name: Smoke-test binary
         # Only the linux-x64 binary can run on the linux runner. The
@@ -143,7 +147,12 @@ jobs:
           EOF
 
       - name: Compile native Windows binary
-        run: bun build --compile --target=bun-windows-x64 src/cli.tsx --outfile=codebase.exe
+        shell: pwsh
+        run: |
+          $versionJson = node -p "JSON.stringify(require('./package.json').version)"
+          bun build --compile --target=bun-windows-x64 `
+            --define "CODEBASE_BUILD_VERSION=$versionJson" `
+            src/cli.tsx --outfile=codebase.exe
 
       - name: Invoke --version and --help
         # Both should exit 0 on a healthy binary. Asking for --help also
