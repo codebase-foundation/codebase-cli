@@ -87,11 +87,16 @@ export function buildDoctorReport(options: DoctorReportOptions): string[] {
 		lines.push(check(s.connected, `mcp ${s.name}: ${s.toolCount} tools`, `mcp ${s.name}: ${s.error ?? "failed"}`));
 	}
 
-	const hasSearch = Boolean(env.TAVILY_API_KEY || env.BRAVE_API_KEY || env.SEARXNG_URL);
+	const localSearch = Boolean(env.TAVILY_API_KEY || env.BRAVE_API_KEY || env.SEARXNG_URL);
+	const hostedSearch = Boolean(creds && creds.source !== "byok");
 	lines.push(
-		hasSearch
-			? check(true, "web_search configured", "")
-			: info("web_search unconfigured — set TAVILY_API_KEY, BRAVE_API_KEY, or SEARXNG_URL to enable"),
+		localSearch
+			? check(true, "web_search configured (local provider)", "")
+			: hostedSearch
+				? check(true, "web_search configured (Codebase hosted)", "")
+				: info(
+						"web_search unconfigured — sign in with `codebase auth login` or set TAVILY_API_KEY, BRAVE_API_KEY, or SEARXNG_URL",
+					),
 	);
 
 	lines.push(

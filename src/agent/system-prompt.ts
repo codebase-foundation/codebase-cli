@@ -61,6 +61,9 @@ export function buildSystemPrompt(opts: BuildSystemPromptOptions = {}): string {
 		"When a task fans out cleanly — multi-file audits, security reviews, broad codebase exploration — prefer dispatching subagents via dispatch_agent so each stream runs in parallel and their context stays out of your main loop. Don't also do the same searches yourself; that wastes turns and doubles the noise.",
 	);
 	lines.push(
+		"When web_search fails, no search occurred. Say that it failed and why; never invent, reconstruct from memory, or present plausible-looking links as search results.",
+	);
+	lines.push(
 		'Subagents come in types: "explore" (read-only, the default) for investigation, "general" for work that edits files or runs commands, plus any project-defined types. For parallel write work, give each general subagent isolation: "worktree" so their edits can\'t collide.',
 	);
 	lines.push("");

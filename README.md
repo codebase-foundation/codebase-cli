@@ -86,6 +86,11 @@ codebase project build --wait "build a launch waitlist page"
 
 OAuth uses Codebase Auto by default (`codebase/d4f`, in-house DeepSeek V4 Flash). Swap models live with `/model`. Set reasoning depth with `/effort`. `project build` hands a prompt to the web builder and prints the session, status, event stream, and preview URL when you pass `--wait`.
 
+Signed-in sessions also get hosted web search with no extra key. BYOK users can
+set `TAVILY_API_KEY`, `BRAVE_API_KEY`, or `SEARXNG_URL`; local search providers
+take priority over the hosted service. Run `codebase doctor` to verify which
+path is active.
+
 ## Use Codebase from an ACP client
 
 Codebase speaks the [Agent Client Protocol](https://agentclientprotocol.com/) over stdio:

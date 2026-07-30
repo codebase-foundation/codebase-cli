@@ -32,6 +32,23 @@ describe("fetchAvailableModels", () => {
 		expect(out).toEqual([{ id: "d4f", name: "Codebase Auto", provider: "codebase" }]);
 	});
 
+	it("preserves model X-API-Key headers for Codebase-issued credentials", async () => {
+		const f = mockFetch(200, { models: [] });
+		vi.stubGlobal("fetch", f);
+		const manualModel = {
+			...model("codebase", "https://codebase.design/api/inference"),
+			headers: { "X-API-Key": "cb_test_manual" },
+		};
+
+		await fetchAvailableModels(manualModel, "cb_test_manual");
+
+		const headers = (f as unknown as ReturnType<typeof vi.fn>).mock.calls[0][1]?.headers;
+		expect(headers).toMatchObject({
+			"X-API-Key": "cb_test_manual",
+		});
+		expect(headers.Authorization).toBeUndefined();
+	});
+
 	it("hits Anthropic's endpoint and maps display_name", async () => {
 		const f = mockFetch(200, { data: [{ id: "claude-opus-4-1", display_name: "Claude Opus 4.1" }] });
 		vi.stubGlobal("fetch", f);

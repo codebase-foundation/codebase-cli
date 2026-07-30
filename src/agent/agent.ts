@@ -82,7 +82,12 @@ export interface CreateAgentOptions {
 	 * faux provider so tests can run without env vars or credentials.
 	 * Production code never sets this.
 	 */
-	configOverride?: { model: ResolvedConfig["model"]; apiKey: string; source: ResolvedConfig["source"] };
+	configOverride?: {
+		model: ResolvedConfig["model"];
+		apiKey: string;
+		source: ResolvedConfig["source"];
+		proxyAuth?: ResolvedConfig["proxyAuth"];
+	};
 	/**
 	 * Runtime model override for proxy/OAuth sessions. Lets the user swap
 	 * models via /model without restarting. Format: `{ provider?, modelId }`.
@@ -184,15 +189,19 @@ export function createAgent(opts: CreateAgentOptions = {}): AgentBundle {
 	const effectiveOverride =
 		opts.modelOverride ??
 		(persistedModel?.modelId ? { provider: persistedModel.provider, modelId: persistedModel.modelId } : undefined);
-	const { model, apiKey, source } = opts.configOverride ?? resolveConfig({ modelOverride: effectiveOverride });
+	const credentials = new CredentialsStore();
+	const {
+		model,
+		apiKey,
+		source,
+		proxyAuth = "bearer",
+	} = opts.configOverride ?? resolveConfig({ credentials, modelOverride: effectiveOverride });
 
 	// OAuth-sourced credentials rotate ~hourly; build a refresh-aware getter
 	// so the agent never sends a stale access token after the first refresh
 	// window. BYOK / explicit / auto sources use the static key passed in.
 	const tokenManager =
-		source === "proxy"
-			? new TokenManager({ store: new CredentialsStore(), oauthConfig: defaultOAuthConfig() })
-			: null;
+		source === "proxy" ? new TokenManager({ store: credentials, oauthConfig: defaultOAuthConfig() }) : null;
 	const getApiKey = tokenManager ? () => tokenManager.getAccessToken() : () => apiKey;
 
 	const config = persistedConfig;
@@ -324,6 +333,17 @@ export function createAgent(opts: CreateAgentOptions = {}): AgentBundle {
 
 	const toolContext: ToolContext = {
 		cwd,
+		...(tokenManager && {
+			platform: {
+				baseUrl: (process.env.CODEBASE_AUTH_BASE_URL ?? "https://codebase.design").replace(/\/+$/, ""),
+				getAuthHeaders: async () => {
+					const token = await tokenManager.getAccessToken();
+					const headers: Record<string, string> =
+						proxyAuth === "api-key" ? { "X-API-Key": token } : { Authorization: `Bearer ${token}` };
+					return headers;
+				},
+			},
+		}),
 		fileStateCache: new FileStateCache(),
 		tasks: new TaskStore({ cwd, taskListId: opts.taskListId ?? sessions.id }),
 		userQueries,

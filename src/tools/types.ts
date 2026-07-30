@@ -18,6 +18,14 @@ import type { TaskStore } from "./task-store.js";
  */
 export interface ToolContext {
 	cwd: string;
+	/**
+	 * Authenticated Codebase platform access. Present for OAuth/manual proxy
+	 * sessions so tools can use hosted services without exposing service keys.
+	 */
+	platform?: {
+		baseUrl: string;
+		getAuthHeaders: () => Promise<Record<string, string>>;
+	};
 	fileStateCache: FileStateCache;
 	tasks: TaskStore;
 	userQueries: UserQueryStore;
