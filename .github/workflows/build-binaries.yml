@@ -78,7 +78,10 @@ jobs:
         # other targets are cross-compiled — we trust bun's compile output
         # for them and verify post-release.
         if: matrix.target == 'bun-linux-x64-modern'
-        run: ./${{ matrix.asset }} --version || true
+        run: |
+          EXPECTED="$(node -p "require('./package.json').version")"
+          ACTUAL="$(./${{ matrix.asset }} --version)"
+          test "${ACTUAL}" = "${EXPECTED}"
 
       - name: Upload to GitHub release
         env:
@@ -149,5 +152,9 @@ jobs:
         # needing real credentials.
         shell: pwsh
         run: |
-          ./codebase.exe --version
+          $expected = node -p "require('./package.json').version"
+          $actual = ./codebase.exe --version
+          if ($actual.Trim() -ne $expected.Trim()) {
+            throw "Version mismatch: expected $expected, got $actual"
+          }
           ./codebase.exe --help

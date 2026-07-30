@@ -1,6 +1,6 @@
 {
 	"name": "codebase-cli",
-	"version": "2.0.0-pre.84",
+	"version": "2.0.0-pre.85",
 	"description": "Codebase CLI — a TypeScript coding agent on the pi-mono runtime. OAuth-aware, any LLM provider, single install.",
 	"keywords": [
 		"ai",
